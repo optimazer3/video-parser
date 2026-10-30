@@ -158,9 +158,8 @@ def test_formatting():
 
 
 REPORT = {
-    "summary": "s", "hit_patterns": ["p"], "weak_spots": [], "recommendations": ["r"], "content_ideas": ["i"],
-    "videos": [{"video_number": 1, "why_it_worked": "w", "hook": "h", "structure": "st",
-                "what_to_improve": ["x"], "repeat_this": ["y"]}],
+    "summary": "s", "takeaways": ["t"], "ideas": ["i"],
+    "videos": [{"video_number": 1, "why": "w", "hook": "h", "how_to_make": ["запись экрана"], "improve": ["x"]}],
 }
 
 
@@ -325,3 +324,46 @@ def test_tiktok_download_falls_back_to_apify():
     media = asyncio.run(svc._process_media(videos))
     assert svc.apify.urls == [videos[0].url, videos[1].url]  # one Apify run for both
     assert media["tiktok:1"].frames and media["tiktok:2"].error  # 2 was not returned by Apify
+
+
+def test_short_report_formatting():
+    from bot.analyzer import SingleReport
+    from bot.formatting import pack, profile_report, single_report
+
+    report = ProfileReport.model_validate({
+        "summary": "Заходят обзоры сервисов с результатом в первом кадре.",
+        "takeaways": ["a", "b", "c", "d"],
+        "videos": [{"video_number": 1, "why": "Готовый результат <сразу>", "hook": "Слайды в кадре",
+                    "how_to_make": ["Шаг 1: запись экрана Gamma", "2) озвучка ElevenLabs", "3. субтитры CapCut",
+                                    "4", "5", "6"],
+                    "improve": ["x", "y", "z"]}],
+        "ideas": ["i1", "i2", "i3", "i4"],
+    })
+    videos = [make_video(i, 10_000 + i) for i in range(8)] + [make_video(50, 100_000)]
+    stats = profile_stats(videos, top=3, now=NOW)
+    messages = profile_report(report, stats)
+    text = "\n".join(messages)
+    assert len(messages) == 1  # short blocks are packed into one message
+    assert "1. запись экрана Gamma\n2. озвучка ElevenLabs\n3. субтитры CapCut" in text  # model numbering removed
+    assert "6" not in text.split("Как сделать без лица")[1].split("Улучшить")[0]  # at most 5 steps
+    assert "&lt;сразу&gt;" in text and "• d" not in text and "• z" not in text and "• i4" not in text
+    single = single_report(SingleReport.model_validate({"video": report.videos[0].model_dump(), "ideas": []}),
+                           make_video(1, 5000))
+    assert "Идеи" not in single[0]
+    assert pack(["a" * 3000, "b" * 3000, "c"]) == ["a" * 3000, "b" * 3000 + "\n\nc"]
+
+
+def test_topics_commands():
+    from bot.topics import apply_command
+
+    current = ["#нейросети", "#chatgpt", "нейросети для работы"]
+    updated, note = apply_command(current, "+ #sora, нейросети для монтажа, #ChatGPT")
+    assert updated == current + ["#sora", "нейросети для монтажа"] and note == "Добавил: #sora, нейросети для монтажа"
+    assert apply_command(current, "добавить #ии")[0][-1] == "#ии"
+    updated, note = apply_command(current, "- chatgpt")  # no exact match: removes the hashtag
+    assert updated == ["#нейросети", "нейросети для работы"] and "#chatgpt" in note
+    assert apply_command(current, "-#нет такой")[1] == "Таких тем в списке нет."
+    assert apply_command(["#a"], "- #a") == (["#a"], "Нельзя удалить все темы — подборке нужна хотя бы одна.")
+    assert apply_command(current, "+")[0] == current
+    assert apply_command(current, "reset") == (None, "Вернул темы по умолчанию.")
+    assert apply_command(current, "#a, b") == (["#a", "b"], "Заменил список тем.")

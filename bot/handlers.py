@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -23,8 +24,9 @@ from aiogram.types import (
 
 from . import costs
 from . import formatting as fmt
+from . import topics as topic_list
 from .analyzer import AnalysisError
-from .apify_source import ApifyError
+from .apify_source import ApifyError, feed_cost_usd
 from .links import find_url, parse_handle, resolve
 from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK
 from .service import Services
@@ -58,10 +60,11 @@ HELP = f"""<b>Что я умею</b>
 
 <b>Разбор одного ролика</b> — пришлите ссылку на видео TikTok или Reels.
 
-<b>Темы</b> (/topics) — по чему искать подборку:
-• /topics — показать текущие
-• /topics #нейросети, #chatgpt, нейросети для работы — задать свои \
-(с # — хэштег, без # — поисковый запрос)
+<b>Темы</b> (/topics) — по чему искать подборку (с # — хэштег, без # — поисковый запрос):
+• /topics — показать, удалить кнопкой ❌ или добавить кнопкой ➕
+• /topics + #sora, нейросети для монтажа — добавить к текущим
+• /topics - #sora — удалить
+• /topics #нейросети, #chatgpt — заменить весь список
 • /topics reset — вернуть темы по умолчанию"""
 
 
@@ -225,22 +228,96 @@ async def cmd_profile_hint(message: Message) -> None:
     )
 
 
+TOPICS_ADD_PROMPT = "➕ Новые темы"
+
+
+async def topics_view(svc: Services, user_id: int, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    topics = await svc.storage.get_topics(user_id, svc.settings.default_topics)
+    s = svc.settings
+    estimate = feed_cost_usd(topics, s.feed_results_per_topic, s.feed_platforms)
+    lines = [f"<i>{escape(note)}</i>\n"] if note else []
+    lines.append(f"<b>Темы подборки</b> · Apify ≈ ${estimate:.2f} за подборку")
+    lines += [f"• {escape(t)}" for t in topics]
+    lines.append(
+        "\nДобавить: <code>/topics + #sora, нейросети для монтажа</code>\n"
+        "Удалить: кнопка ❌ или <code>/topics - #sora</code>\n"
+        "С # — хэштег, без # — поисковый запрос."
+    )
+    buttons = [InlineKeyboardButton(text=f"❌ {t}"[:60], callback_data=f"tp:del:{i}") for i, t in enumerate(topics)]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([
+        InlineKeyboardButton(text="➕ Добавить", callback_data="tp:add"),
+        InlineKeyboardButton(text="↩️ По умолчанию", callback_data="tp:reset"),
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_topics(callback: CallbackQuery, svc: Services, note: str) -> None:
+    text, keyboard = await topics_view(svc, callback.from_user.id, note)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=keyboard)
+
+
 @router.message(Command("topics"))
 @router.message(F.text == BTN_TOPICS)
 async def cmd_topics(message: Message, svc: Services, command: CommandObject | None = None) -> None:
     user_id = message.from_user.id
     args = (command.args or "").strip() if command else ""
-    if args.lower() == "reset":
-        await svc.storage.set_topics(user_id, None)
-    elif args:
-        topics = [t.strip() for t in args.replace("\n", ",").split(",") if t.strip()]
-        await svc.storage.set_topics(user_id, topics)
+    note = ""
+    if args:
+        current = await svc.storage.get_topics(user_id, svc.settings.default_topics)
+        updated, note = topic_list.apply_command(current, args)
+        if updated != current:
+            await svc.storage.set_topics(user_id, updated)
+    text, keyboard = await topics_view(svc, user_id, note)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("tp:del:"))
+async def cb_topic_delete(callback: CallbackQuery, svc: Services) -> None:
+    user_id = callback.from_user.id
     topics = await svc.storage.get_topics(user_id, svc.settings.default_topics)
-    await message.answer(
-        "<b>Темы подборки</b>\n" + "\n".join(f"• {escape(t)}" for t in topics)
-        + "\n\nИзменить: <code>/topics #нейросети, #chatgpt, нейросети для работы</code>\n"
-        "С # — хэштег, без # — поисковый запрос. Сбросить: <code>/topics reset</code>"
+    index = int(callback.data.rsplit(":", 1)[1])
+    if index >= len(topics):
+        await callback.answer("Список уже изменился", show_alert=True)
+        return await show_topics(callback, svc, "")
+    if len(topics) == 1:
+        await callback.answer("Нельзя удалить последнюю тему", show_alert=True)
+        return None
+    removed = topics.pop(index)
+    await svc.storage.set_topics(user_id, topics)
+    await callback.answer(f"Удалил {removed}")
+    await show_topics(callback, svc, f"Удалил: {removed}")
+
+
+@router.callback_query(F.data == "tp:reset")
+async def cb_topic_reset(callback: CallbackQuery, svc: Services) -> None:
+    await svc.storage.set_topics(callback.from_user.id, None)
+    await callback.answer()
+    await show_topics(callback, svc, "Вернул темы по умолчанию.")
+
+
+@router.callback_query(F.data == "tp:add")
+async def cb_topic_add(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.answer(
+        f"{TOPICS_ADD_PROMPT}: напишите в ответ через запятую. С # — хэштег, без # — поисковый запрос.",
+        reply_markup=ForceReply(input_field_placeholder="#sora, нейросети для монтажа"),
     )
+
+
+@router.message(F.reply_to_message.text.startswith(TOPICS_ADD_PROMPT), F.text)
+async def on_topics_reply(message: Message, svc: Services) -> None:
+    user_id = message.from_user.id
+    current = await svc.storage.get_topics(user_id, svc.settings.default_topics)
+    updated, added = topic_list.add(current, topic_list.parse(message.text))
+    if added:
+        await svc.storage.set_topics(user_id, updated)
+    note = "Добавил: " + ", ".join(added) if added else "Эти темы уже есть."
+    text, keyboard = await topics_view(svc, user_id, note)
+    await message.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("an:"))

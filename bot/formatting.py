@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 
 from .analyzer import ProfileReport, SingleReport, VideoAnalysis
@@ -107,8 +108,21 @@ def profile_overview(platform: str, username: str, stats: ProfileStats) -> str:
     return "\n".join(lines)
 
 
-def _bullets(items: list[str]) -> str:
-    return "\n".join(f"• {escape(item)}" for item in items if item.strip())
+# How much of each list the report shows: the model is asked for this, the formatter enforces it.
+MAX_STEPS, MAX_IMPROVE, MAX_TAKEAWAYS, MAX_IDEAS = 5, 2, 3, 3
+STEP_NUMBER_RE = re.compile(r"^\s*(?:шаг\s*)?\d+\s*[.):—-]\s*", re.IGNORECASE)
+
+
+def _clean(items: list[str], limit: int) -> list[str]:
+    return [STEP_NUMBER_RE.sub("", item).strip() for item in items if item.strip()][:limit]
+
+
+def _bullets(items: list[str], limit: int) -> str:
+    return "\n".join(f"• {escape(item)}" for item in _clean(items, limit))
+
+
+def _steps(items: list[str], limit: int) -> str:
+    return "\n".join(f"{i}. {escape(item)}" for i, item in enumerate(_clean(items, limit), 1))
 
 
 def video_analysis(analysis: VideoAnalysis, video: Video | None, ratio: float | None = None) -> str:
@@ -116,51 +130,50 @@ def video_analysis(analysis: VideoAnalysis, video: Video | None, ratio: float | 
     if video:
         header += f" · {num(estimated_views(video))} просм."
         if ratio:
-            header += f" · ×{ratio:.1f}"
+            header += f" · ×{ratio:.1f} к медиане"
         header += f"\n{escape(video.url)}"
     parts = [
         header,
-        f"<b>Почему залетел</b>\n{escape(analysis.why_it_worked)}",
-        f"<b>Хук</b>\n{escape(analysis.hook)}",
-        f"<b>Структура и подача</b>\n{escape(analysis.structure)}",
+        f"🔥 <b>Почему залетел:</b> {escape(analysis.why)}",
+        f"🪝 <b>Хук:</b> {escape(analysis.hook)}",
     ]
-    if analysis.what_to_improve:
-        parts.append(f"<b>Что улучшить</b>\n{_bullets(analysis.what_to_improve)}")
-    if analysis.repeat_this:
-        parts.append(f"<b>Что повторять</b>\n{_bullets(analysis.repeat_this)}")
+    if _clean(analysis.how_to_make, MAX_STEPS):
+        parts.append(f"🛠 <b>Как сделать без лица:</b>\n{_steps(analysis.how_to_make, MAX_STEPS)}")
+    if _clean(analysis.improve, MAX_IMPROVE):
+        parts.append(f"⚠️ <b>Улучшить:</b>\n{_bullets(analysis.improve, MAX_IMPROVE)}")
     return "\n\n".join(parts)
 
 
+def _ideas(ideas: list[str]) -> str | None:
+    return f"💡 <b>Идеи роликов</b>\n{_bullets(ideas, MAX_IDEAS)}" if _clean(ideas, MAX_IDEAS) else None
+
+
+def pack(blocks: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Join short blocks into as few messages as possible without cutting a block in two."""
+    messages: list[str] = []
+    for block in filter(None, blocks):
+        if messages and len(messages[-1]) + 2 + len(block) <= limit:
+            messages[-1] += "\n\n" + block
+        else:
+            messages.append(block)
+    return messages
+
+
 def profile_report(report: ProfileReport, stats: ProfileStats) -> list[str]:
-    messages = [f"<b>🧠 Итог по аккаунту</b>\n{escape(report.summary)}"]
-    if report.hit_patterns:
-        messages[0] += f"\n\n<b>Что общего у хитов</b>\n{_bullets(report.hit_patterns)}"
+    head = f"🧠 <b>Главное</b>\n{escape(report.summary)}"
+    if _clean(report.takeaways, MAX_TAKEAWAYS):
+        head += "\n" + _bullets(report.takeaways, MAX_TAKEAWAYS)
+    blocks = [head]
     for analysis in report.videos:
         index = analysis.video_number - 1
         video = stats.hits[index] if 0 <= index < len(stats.hits) else None
-        messages.append(video_analysis(analysis, video, stats.ratio(video) if video else None))
-    tail = []
-    if report.weak_spots:
-        tail.append(f"<b>📉 Что тянет вниз</b>\n{_bullets(report.weak_spots)}")
-    if report.recommendations:
-        tail.append(f"<b>✅ Рекомендации</b>\n{_bullets(report.recommendations)}")
-    if report.content_ideas:
-        tail.append(f"<b>💡 Идеи роликов</b>\n{_bullets(report.content_ideas)}")
-    if tail:
-        messages.append("\n\n".join(tail))
-    return messages
+        blocks.append(video_analysis(analysis, video, stats.ratio(video) if video else None))
+    blocks.append(_ideas(report.ideas))
+    return pack(blocks)
 
 
 def single_report(report: SingleReport, video: Video) -> list[str]:
-    messages = [video_analysis(report.video, video)]
-    tail = []
-    if report.how_to_adapt:
-        tail.append(f"<b>🔧 Как применить у себя</b>\n{_bullets(report.how_to_adapt)}")
-    if report.content_ideas:
-        tail.append(f"<b>💡 Идеи по мотивам</b>\n{_bullets(report.content_ideas)}")
-    if tail:
-        messages.append("\n\n".join(tail))
-    return messages
+    return pack([video_analysis(report.video, video), _ideas(report.ideas)])
 
 
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
