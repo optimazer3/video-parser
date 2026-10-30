@@ -21,6 +21,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
+from . import costs
 from . import formatting as fmt
 from .analyzer import AnalysisError
 from .apify_source import ApifyError
@@ -157,6 +158,7 @@ async def run_exclusive(message: Message, svc: Services, user_id: int, job: Call
         await message.answer("⏳ Я ещё выполняю предыдущую задачу — дождитесь результата.")
         return
     async with lock:
+        spent = costs.track()
         try:
             await job()
         except (ApifyError, AnalysisError) as exc:
@@ -164,6 +166,8 @@ async def run_exclusive(message: Message, svc: Services, user_id: int, job: Call
         except Exception as exc:  # noqa: BLE001 - report anything to the user instead of failing silently
             log.exception("job failed")
             await message.answer(f"❌ Что-то пошло не так: {escape(type(exc).__name__)}: {escape(str(exc))[:500]}")
+        if not spent.empty:
+            await message.answer(fmt.costs_line(spent))
 
 
 async def analyze_profile(message: Message, svc: Services, user_id: int, platform: str, username: str) -> None:

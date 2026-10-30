@@ -21,6 +21,8 @@ fi
 echo "Ставлю зависимости ..."
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
+# yt-dlp надо обновлять, когда TikTok что-то меняет у себя
+.venv/bin/python -m pip install --upgrade yt-dlp
 
 if [ ! -f .env ]; then
     cp .env.example .env

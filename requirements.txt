@@ -6,3 +6,5 @@ apify-client>=3.4,<4
 pydantic>=2.7
 python-dotenv>=1.0
 tzdata>=2024.1
+# TikTok changes often, keep yt-dlp fresh: setup.bat / setup.sh upgrade it on every run
+yt-dlp>=2025.1

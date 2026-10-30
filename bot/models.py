@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -147,6 +148,35 @@ def tiktok_from_apify(item: dict[str, Any]) -> Video | None:
         video_url=media_urls[0] if media_urls else None,
         subtitle_url=subtitle_url,
         is_pinned=bool(item.get("isPinned")),
+    )
+
+
+def tiktok_from_ytdlp(info: dict[str, Any]) -> Video | None:
+    """Convert yt-dlp metadata of a TikTok video (used for single links: free, no Apify run)."""
+    video_id = info.get("id")
+    if not video_id:
+        return None
+    username = info.get("uploader") or info.get("channel") or ""
+    caption = info.get("description") or info.get("title") or ""
+    artist = info.get("artist") or next(iter(info.get("artists") or []), None)
+    music = " — ".join(x for x in (artist, info.get("track")) if x)
+    return Video(
+        platform=TIKTOK,
+        id=str(video_id),
+        url=info.get("webpage_url") or f"https://www.tiktok.com/@{username}/video/{video_id}",
+        author=username,
+        caption=caption,
+        hashtags=re.findall(r"#(\w+)", caption),
+        created_at=_date(info.get("timestamp")),
+        duration=info.get("duration"),
+        views=_int(info.get("view_count")),
+        likes=_int(info.get("like_count")) or 0,
+        comments=_int(info.get("comment_count")) or 0,
+        shares=_int(info.get("repost_count")),
+        saves=_int(info.get("save_count")),
+        author_followers=_int(info.get("channel_follower_count")),
+        music=music or None,
+        cover_url=info.get("thumbnail"),
     )
 
 

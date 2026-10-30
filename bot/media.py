@@ -33,6 +33,7 @@ class VideoMedia:
     transcript_source: str | None = None
     duration: float | None = None
     error: str | None = None
+    cover_only: bool = False  # the video itself could not be downloaded, frames hold just the cover
 
 
 class MediaProcessor:
@@ -42,8 +43,10 @@ class MediaProcessor:
         frames_per_video: int = 6,
         llm: LLMClient | None = None,
         transcribe_model: str | None = None,
+        proxy: str | None = None,
     ):
         self.apify_token = apify_token
+        self.proxy = proxy
         self.frames_per_video = frames_per_video
         self.llm = llm
         self.transcribe_model = transcribe_model
@@ -62,17 +65,13 @@ class MediaProcessor:
             except Exception as exc:  # noqa: BLE001 - subtitles are optional
                 log.warning("subtitles failed for %s: %s", video.key, exc)
 
-        if not video.video_url:
-            media.error = "нет ссылки на файл видео"
-            return media
-
         with tempfile.TemporaryDirectory(prefix="vp_") as tmp:
-            path = Path(tmp) / "video.mp4"
             try:
-                await self._download(video.video_url, path, session)
+                path = await self._fetch_video(video, Path(tmp), session)
             except Exception as exc:  # noqa: BLE001
                 log.warning("download failed for %s: %s", video.key, exc)
-                media.error = f"не удалось скачать видео ({exc})"
+                media.error = f"не удалось скачать видео ({short_error(exc)})"
+                await self._cover_frame(video, media, Path(tmp), session)
                 return media
 
             if self.has_ffmpeg:
@@ -90,6 +89,28 @@ class MediaProcessor:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("transcription failed for %s: %s", video.key, exc)
         return media
+
+    async def _fetch_video(self, video: Video, workdir: Path, session: aiohttp.ClientSession) -> Path:
+        if video.video_url:
+            path = workdir / "video.mp4"
+            await self._download(video.video_url, path, session)
+            return path
+        # No direct file link (TikTok): yt-dlp downloads it for free.
+        return await asyncio.to_thread(ytdlp_download, video.url, workdir, self.proxy)
+
+    async def _cover_frame(self, video: Video, media: VideoMedia, workdir: Path, session: aiohttp.ClientSession) -> None:
+        """When the video is unavailable, give the model at least the cover."""
+        if not video.cover_url or not self.has_ffmpeg:
+            return
+        try:
+            raw = workdir / "cover"
+            await self._download(video.cover_url, raw, session)
+            jpeg = await to_jpeg(raw, workdir / "cover.jpg")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cover failed for %s: %s", video.key, exc)
+            return
+        if jpeg:
+            media.frames, media.cover_only = [(0.0, jpeg)], True
 
     def _headers(self, url: str) -> dict[str, str]:
         headers = {"User-Agent": USER_AGENT}
@@ -122,6 +143,64 @@ class MediaProcessor:
         if audio is None:
             return None  # no sound track
         return await self.llm.transcribe(audio, self.transcribe_model)
+
+
+class _YtDlpLogger:
+    def debug(self, msg: str) -> None:
+        log.debug("yt-dlp: %s", msg)
+
+    info = debug
+
+    def warning(self, msg: str) -> None:
+        log.debug("yt-dlp warning: %s", msg)
+
+    def error(self, msg: str) -> None:
+        log.warning("yt-dlp: %s", msg)
+
+
+def _ytdlp_options(proxy: str | None) -> dict:
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 2,
+        "logger": _YtDlpLogger(),
+    }
+    if proxy:
+        options["proxy"] = proxy
+    return options
+
+
+def ytdlp_info(url: str, proxy: str | None = None) -> dict:
+    """Video metadata (views, likes, caption, ...) without downloading and without Apify."""
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({**_ytdlp_options(proxy), "skip_download": True}) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def ytdlp_download(url: str, workdir: Path, proxy: str | None = None) -> Path:
+    import yt_dlp
+
+    options = {
+        **_ytdlp_options(proxy),
+        "outtmpl": str(workdir / "video.%(ext)s"),
+        "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+        "max_filesize": MAX_VIDEO_BYTES,
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        ydl.extract_info(url, download=True)
+    files = sorted(workdir.glob("video.*"))
+    if not files:
+        raise RuntimeError("yt-dlp не сохранил файл")
+    return files[0]
+
+
+def short_error(exc: Exception) -> str:
+    text = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).removeprefix("ERROR: ").strip()
+    return text[:200] or type(exc).__name__
 
 
 def vtt_to_text(raw: str) -> str:
@@ -161,6 +240,15 @@ async def probe_duration(path: Path) -> float | None:
         return float(out.decode().strip())
     except ValueError:
         return None
+
+
+async def to_jpeg(source: Path, out: Path) -> bytes | None:
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(source), "-frames:v", "1", "-vf", "scale=512:-2",
+        "-q:v", "4", str(out), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await process.wait()
+    return out.read_bytes() if process.returncode == 0 and out.exists() else None
 
 
 async def extract_audio(path: Path, workdir: Path) -> bytes | None:

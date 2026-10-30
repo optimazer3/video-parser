@@ -9,6 +9,8 @@ from typing import Any
 
 import aiohttp
 
+from . import costs
+
 log = logging.getLogger(__name__)
 
 RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504}
@@ -69,7 +71,9 @@ class LLMClient:
     async def chat(self, payload: dict[str, Any]) -> tuple[str, str | None]:
         """Returns (text, finish_reason)."""
         data = await self._post("/chat/completions", payload, timeout=600)
-        log.info("LLM usage: %s", data.get("usage"))
+        usage = data.get("usage") or {}
+        log.info("LLM %s usage: %s", payload.get("model"), usage)
+        costs.add_llm(data.get("model") or payload.get("model"), usage.get("cost_rub"))
         choices = data.get("choices") or []
         if not choices:
             raise LLMError(f"Пустой ответ нейросети: {str(data)[:300]}")
@@ -88,5 +92,6 @@ class LLMClient:
             "response_format": "json",
         }
         data = await self._post("/audio/transcriptions", payload, timeout=300)
+        costs.add_llm(model, (data.get("usage") or {}).get("cost_rub"))
         text = (data.get("text") or "").strip()
         return text or None

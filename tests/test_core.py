@@ -202,3 +202,88 @@ def test_analyzer_gives_up_after_two_bad_answers():
 def test_describe_video():
     prompt = describe_video(tiktok_from_apify(TIKTOK_ITEM), 1, 4.2)
     assert "×4.2" in prompt and "сохранения: 10 000" in prompt
+
+
+def test_run_cost_usd():
+    from types import SimpleNamespace as NS
+
+    from bot.apify_source import run_cost_usd
+
+    ppe = NS(
+        pricing_info=NS(pricing_model="PAY_PER_EVENT", pricing_per_event=NS(actor_charge_events={
+            "actor-start": NS(event_price_usd=0.005), "result": NS(event_price_usd=0.003),
+            "video-download": NS(event_price_usd=0.02),
+        })),
+        charged_event_counts={"actor-start": 1, "result": 30, "video-download": 5},
+        platform_usage_billing_model="DEVELOPER", usage_total_usd=0.4,
+    )
+    assert run_cost_usd(ppe, 30) == pytest.approx(0.005 + 0.09 + 0.1)
+    per_item = NS(pricing_info=NS(pricing_model="PRICE_PER_DATASET_ITEM", price_per_unit_usd=0.0026),
+                  charged_event_counts=None, platform_usage_billing_model=None, usage_total_usd=0.2)
+    assert run_cost_usd(per_item, 30) == pytest.approx(0.078)
+    free = NS(pricing_info=None, charged_event_counts=None, platform_usage_billing_model=None, usage_total_usd=0.12)
+    assert run_cost_usd(free, 100) == pytest.approx(0.12)
+
+
+def test_costs_are_tracked_across_tasks():
+    from bot import costs
+    from bot.formatting import costs_line
+
+    async def job():
+        spent = costs.track()
+        await asyncio.gather(asyncio.sleep(0, costs.add_apify("a", 0.1)), asyncio.sleep(0, costs.add_apify("b", 0.05)))
+
+        async def llm():
+            costs.add_llm("openai/gpt-6.1-terra", 2.5)
+            costs.add_llm("openai/gpt-4o-mini-transcribe", 0.3)
+
+        await asyncio.gather(llm())
+        return spent
+
+    spent = asyncio.run(job())
+    assert spent.apify_usd == pytest.approx(0.15) and len(spent.apify_runs) == 2
+    line = costs_line(spent)
+    assert "$0.15" in line and "2.8 ₽" in line and "openai/gpt-6.1-terra" in line
+    costs.add_apify("outside", 1.0)  # no tracker in this context: ignored, no error
+
+
+def test_duplicate_env_keys(tmp_path):
+    from bot.config import duplicate_keys
+
+    env = tmp_path / ".env"
+    env.write_text("LLM_MODEL=openai/gpt-6.1-terra\n# LLM_MODEL=x\nAPIFY_TOKEN=1\nLLM_MODEL=anthropic/claude-sonnet-5.5\n",
+                   encoding="utf-8")
+    assert duplicate_keys(str(env)) == ["LLM_MODEL"]
+    assert duplicate_keys(str(tmp_path / "missing")) == []
+
+
+def test_profile_cache(tmp_path):
+    from bot.storage import Storage
+
+    async def run():
+        storage = Storage(str(tmp_path / "db.sqlite3"))
+        await storage.open()
+        videos = [make_video(1, 1000), make_video(2, 5000)]
+        assert await storage.get_profile(TIKTOK, "AI_Guru", 24) is None
+        await storage.save_profile(TIKTOK, "ai_guru", videos)
+        cached = await storage.get_profile(TIKTOK, "AI_Guru", 24)
+        disabled = await storage.get_profile(TIKTOK, "ai_guru", 0)
+        await storage.close()
+        return cached, disabled
+
+    cached, disabled = asyncio.run(run())
+    assert [v.views for v in cached] == [1000, 5000] and disabled is None
+
+
+def test_tiktok_from_ytdlp():
+    from bot.models import tiktok_from_ytdlp
+
+    video = tiktok_from_ytdlp({
+        "id": "7312", "uploader": "ai_guru", "description": "Нейросеть для презентаций #нейросети #ai",
+        "timestamp": 1761800000, "duration": 34, "view_count": 120000, "like_count": 9000, "comment_count": 300,
+        "repost_count": 150, "webpage_url": "https://www.tiktok.com/@ai_guru/video/7312", "track": "original sound",
+        "artists": ["ai_guru"], "thumbnail": "https://example.com/c.jpg",
+    })
+    assert (video.key, video.author, video.views, video.shares) == ("tiktok:7312", "ai_guru", 120000, 150)
+    assert video.hashtags == ["нейросети", "ai"] and video.music == "ai_guru — original sound"
+    assert video.saves is None and video.created_at.year == 2025

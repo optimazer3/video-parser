@@ -150,8 +150,11 @@ def describe_video(video: Video, number: int | None = None, ratio: float | None 
 def _video_blocks(video: Video, number: int, ratio: float | None, media: VideoMedia | None) -> list[dict]:
     blocks: list[dict] = [{"type": "text", "text": describe_video(video, number, ratio, media)}]
     if media and media.frames:
-        seconds = ", ".join(f"{s:g} с" for s, _ in media.frames)
-        blocks.append({"type": "text", "text": f"Кадры ролика №{number} на секундах: {seconds}"})
+        if media.cover_only:
+            label = f"Видео ролика №{number} скачать не удалось, ниже только его обложка."
+        else:
+            label = f"Кадры ролика №{number} на секундах: " + ", ".join(f"{s:g} с" for s, _ in media.frames)
+        blocks.append({"type": "text", "text": label})
         for _, jpeg in media.frames:
             data_url = "data:image/jpeg;base64," + base64.standard_b64encode(jpeg).decode()
             blocks.append({"type": "image_url", "image_url": {"url": data_url}})

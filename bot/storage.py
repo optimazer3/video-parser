@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS videos (
     data TEXT NOT NULL,
     saved_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS profiles (
+    key TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    saved_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
     user_id INTEGER NOT NULL,
     name TEXT NOT NULL,
@@ -72,6 +77,25 @@ class Storage:
         async with self.db.execute("SELECT data FROM videos WHERE key = ?", (key,)) as cursor:
             row = await cursor.fetchone()
         return Video.from_dict(json.loads(row[0])) if row else None
+
+    async def get_profile(self, platform: str, username: str, max_age_hours: float) -> list[Video] | None:
+        """Videos of a profile scraped less than max_age_hours ago (saves a paid Apify run)."""
+        if max_age_hours <= 0:
+            return None
+        async with self.db.execute(
+            "SELECT data FROM profiles WHERE key = ? AND saved_at >= ?",
+            (f"{platform}:{username.lower()}", int(time.time() - max_age_hours * 3600)),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return [Video.from_dict(item) for item in json.loads(row[0])] if row else None
+
+    async def save_profile(self, platform: str, username: str, videos: list[Video]) -> None:
+        await self.db.execute(
+            "INSERT OR REPLACE INTO profiles (key, data, saved_at) VALUES (?, ?, ?)",
+            (f"{platform}:{username.lower()}", json.dumps([v.to_dict() for v in videos], ensure_ascii=False),
+             int(time.time())),
+        )
+        await self.db.commit()
 
     async def get_setting(self, user_id: int, name: str) -> str | None:
         async with self.db.execute(

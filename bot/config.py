@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 DEFAULT_TOPICS = (
     "#нейросети",
@@ -50,6 +52,15 @@ def _json(name: str) -> dict:
     return data
 
 
+def duplicate_keys(path: str) -> list[str]:
+    """Keys written twice in .env: only the last value counts, which is easy to miss."""
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8-sig", errors="replace") as file:
+        keys = [m.group(1) for line in file if (m := re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", line))]
+    return [key for key, count in Counter(keys).items() if count > 1]
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
@@ -81,16 +92,21 @@ class Settings:
     feed_results_per_topic: int
 
     profile_videos: int
+    profile_cache_hours: float
     analyze_top: int
     frames_per_video: int
 
     digest_time: str | None
     timezone: str
     db_path: str
+    env_path: str
+    env_duplicates: tuple[str, ...]
 
     @classmethod
     def from_env(cls) -> "Settings":
-        load_dotenv()
+        # The .env file wins over variables already set in the system, so what you see there is what runs.
+        env_path = find_dotenv(usecwd=True) or find_dotenv()
+        load_dotenv(env_path or None, override=True)
         telegram_token = _str("TELEGRAM_BOT_TOKEN")
         apify_token = _str("APIFY_TOKEN")
         missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", telegram_token), ("APIFY_TOKEN", apify_token)) if not v]
@@ -117,18 +133,21 @@ class Settings:
             tiktok_extra_input=_json("APIFY_TIKTOK_EXTRA_INPUT"),
             instagram_profile_extra_input=_json("APIFY_INSTAGRAM_PROFILE_EXTRA_INPUT"),
             instagram_hashtag_extra_input=_json("APIFY_INSTAGRAM_HASHTAG_EXTRA_INPUT"),
-            apify_max_charge_usd=_float("APIFY_MAX_CHARGE_USD", 2.0),
+            apify_max_charge_usd=_float("APIFY_MAX_CHARGE_USD", 0.5),
             default_topics=_list("TOPICS", DEFAULT_TOPICS),
             feed_platforms=_list("FEED_PLATFORMS", ("tiktok", "instagram")),
             feed_days=_int("FEED_DAYS", 7),
             feed_size=_int("FEED_SIZE", 10),
             feed_min_views=_int("FEED_MIN_VIEWS", 20_000),
             feed_min_likes=_int("FEED_MIN_LIKES", 500),
-            feed_results_per_topic=_int("FEED_RESULTS_PER_TOPIC", 30),
-            profile_videos=_int("PROFILE_VIDEOS", 40),
+            feed_results_per_topic=_int("FEED_RESULTS_PER_TOPIC", 20),
+            profile_videos=_int("PROFILE_VIDEOS", 30),
+            profile_cache_hours=_float("PROFILE_CACHE_HOURS", 24),
             analyze_top=_int("ANALYZE_TOP", 5),
             frames_per_video=_int("FRAMES_PER_VIDEO", 6),
             digest_time=_str("DIGEST_TIME"),
             timezone=_str("TIMEZONE", "Europe/Moscow"),
             db_path=_str("DB_PATH", "data/bot.sqlite3"),
+            env_path=env_path,
+            env_duplicates=tuple(duplicate_keys(env_path)),
         )

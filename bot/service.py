@@ -7,14 +7,15 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from . import costs
 from .analyzer import Analyzer, ProfileReport, SingleReport
 from .apify_source import ApifyError, ApifySource
 from .config import Settings
 from .llm import LLMClient
-from .media import MediaProcessor, VideoMedia
+from .media import MediaProcessor, VideoMedia, short_error, ytdlp_info
 from .metrics import ProfileStats, pick_feed, profile_stats
 from .net import http_session
-from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK, Video
+from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK, Video, tiktok_from_ytdlp
 from .storage import Storage
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class Services:
         self.apify = ApifySource(settings)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key) if settings.llm_api_key else None
         self.media = MediaProcessor(
-            settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model
+            settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model, settings.proxy
         )
         self.analyzer = Analyzer(llm, settings.llm_model, settings.llm_reasoning_effort) if llm else None
         self._user_locks: dict[int, asyncio.Lock] = {}
@@ -88,10 +89,15 @@ class Services:
     async def analyze_profile(self, platform: str, username: str, progress: Progress = _noop) -> ProfileResult:
         s = self.settings
         label = PLATFORM_LABELS[platform]
-        await progress(f"⏳ Собираю последние {s.profile_videos} роликов @{username} ({label})…")
-        videos = await self.apify.profile(platform, username, s.profile_videos)
-        if not videos:
-            raise ApifyError(f"Не нашёл роликов у @{username} — проверьте ник и что аккаунт открытый")
+        videos = await self.storage.get_profile(platform, username, s.profile_cache_hours)
+        if videos:
+            costs.mark_cached()
+        else:
+            await progress(f"⏳ Собираю последние {s.profile_videos} роликов @{username} ({label})…")
+            videos = await self.apify.profile(platform, username, s.profile_videos)
+            if not videos:
+                raise ApifyError(f"Не нашёл роликов у @{username} — проверьте ник и что аккаунт открытый")
+            await self.storage.save_profile(platform, username, videos)
 
         stats = profile_stats(videos, top=s.analyze_top)
         await self.storage.save_videos(stats.hits)
@@ -99,8 +105,7 @@ class Services:
             return ProfileResult(stats, None)
 
         await progress(f"🎬 Скачиваю {len(stats.hits)} лучших роликов, вырезаю кадры и расшифровываю речь…")
-        hits = await self.apify.with_media(stats.hits)
-        media = await self._process_media(hits)
+        media = await self._process_media(stats.hits)
 
         await progress("🧠 Разбираю, почему ролики залетели… (1–3 минуты)")
         report = await self.analyzer.profile_report(platform, username, stats, media)
@@ -112,7 +117,8 @@ class Services:
     ) -> tuple[Video, SingleReport]:
         if video is None:
             await progress("⏳ Загружаю ролик…")
-            video = await self.apify.single_video(platform, url)
+            video = await self._tiktok_by_ytdlp(url) if platform == TIKTOK else None
+            video = video or await self.apify.single_video(platform, url)
             if video is None:
                 raise ApifyError("Не удалось получить ролик — проверьте ссылку")
             await self.storage.save_videos([video])
@@ -121,11 +127,18 @@ class Services:
             fresh = await self.apify.single_video(INSTAGRAM, video.url)
             video = fresh or video
         await progress("🎬 Скачиваю ролик, вырезаю кадры и расшифровываю речь…")
-        (video,) = await self.apify.with_media([video])
         media = await self._process_media([video])
         await progress("🧠 Разбираю ролик…")
         report = await self.analyzer.single_report(video, media.get(video.key))
         return video, report
+
+    async def _tiktok_by_ytdlp(self, url: str) -> Video | None:
+        """TikTok stats for a single link straight from TikTok via yt-dlp — no paid Apify run."""
+        try:
+            return tiktok_from_ytdlp(await asyncio.to_thread(ytdlp_info, url, self.settings.proxy))
+        except Exception as exc:  # noqa: BLE001 - fall back to Apify
+            log.warning("yt-dlp info failed for %s: %s", url, short_error(exc))
+            return None
 
     async def _process_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
         async with http_session(self.settings.proxy, timeout=180) as session:

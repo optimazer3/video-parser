@@ -5,6 +5,7 @@ from __future__ import annotations
 from html import escape
 
 from .analyzer import ProfileReport, SingleReport, VideoAnalysis
+from .costs import Costs
 from .metrics import ProfileStats, estimated_views
 from .models import PLATFORM_LABELS, TIKTOK, Video
 
@@ -176,3 +177,15 @@ def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def costs_line(costs: Costs) -> str:
+    parts = []
+    if costs.apify_runs:
+        parts.append(f"Apify ≈ ${costs.apify_usd:.2f} ({len(costs.apify_runs)} запуск.)")
+    elif costs.from_cache:
+        parts.append("Apify — $0, профиль из кэша")
+    if costs.llm_models:
+        models = ", ".join(escape(m) for m in costs.llm_models)
+        parts.append(f"нейросеть ≈ {costs.llm_rub:.1f} ₽ ({models})")
+    return "<i>💸 " + " · ".join(parts) + "</i>"

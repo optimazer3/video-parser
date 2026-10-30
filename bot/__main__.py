@@ -14,6 +14,8 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 
+from . import costs
+from . import formatting as fmt
 from .config import Settings
 from .handlers import AccessMiddleware, router, send_feed
 from .net import safe_proxy
@@ -69,8 +71,11 @@ async def daily_digest(bot: Bot, svc: Services) -> None:
             if lock.locked():
                 continue
             async with lock:
+                spent = costs.track()
                 try:
                     await send_feed(bot, user_id, user_id, svc, quiet=True)
+                    if not spent.empty:
+                        await bot.send_message(user_id, fmt.costs_line(spent))
                 except Exception:  # noqa: BLE001 - the digest must keep running tomorrow
                     log.exception("digest failed for %s", user_id)
 
@@ -80,7 +85,12 @@ async def main() -> None:
     settings = Settings.from_env()
     if not settings.allowed_user_ids:
         log.warning("ALLOWED_USER_IDS пуст: бот ответит только вашим Telegram ID. Напишите ему /start.")
-    if not settings.llm_api_key:
+    log.info("Настройки из %s", settings.env_path or "переменных окружения (файл .env не найден)")
+    for key in settings.env_duplicates:
+        log.warning("В .env ключ %s записан несколько раз — действует последнее значение. Оставьте одну строку.", key)
+    if settings.llm_api_key:
+        log.info("Модель разбора: %s · расшифровка речи: %s", settings.llm_model, settings.transcribe_model or "выключена")
+    else:
         log.warning("POLZA_API_KEY не задан: будет только статистика, без разбора роликов.")
 
     session = AiohttpSession(proxy=settings.proxy) if settings.proxy else None

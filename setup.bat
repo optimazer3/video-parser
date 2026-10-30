@@ -28,6 +28,8 @@ echo Ставлю зависимости ...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto :fail
+rem yt-dlp надо обновлять, когда TikTok что-то меняет у себя
+".venv\Scripts\python.exe" -m pip install --upgrade yt-dlp
 
 if not exist ".env" (
     copy ".env.example" ".env" >nul
