@@ -42,13 +42,11 @@ class MediaProcessor:
         frames_per_video: int = 6,
         llm: LLMClient | None = None,
         transcribe_model: str | None = None,
-        proxy: str | None = None,
     ):
         self.apify_token = apify_token
         self.frames_per_video = frames_per_video
         self.llm = llm
         self.transcribe_model = transcribe_model
-        self.proxy = proxy
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         if not self.has_ffmpeg:
             log.warning("ffmpeg не найден — кадры из видео извлекаться не будут")
@@ -93,11 +91,6 @@ class MediaProcessor:
                     log.warning("transcription failed for %s: %s", video.key, exc)
         return media
 
-    def _proxy(self, url: str) -> str | None:
-        # Apify storage is reachable directly; the proxy is meant for blocked CDNs such as Instagram's.
-        host = urlparse(url).hostname or ""
-        return None if host.endswith("apify.com") else self.proxy
-
     def _headers(self, url: str) -> dict[str, str]:
         headers = {"User-Agent": USER_AGENT}
         host = urlparse(url).hostname or ""
@@ -108,7 +101,7 @@ class MediaProcessor:
         return headers
 
     async def _download(self, url: str, path: Path, session: aiohttp.ClientSession) -> None:
-        async with session.get(url, headers=self._headers(url), proxy=self._proxy(url)) as response:
+        async with session.get(url, headers=self._headers(url)) as response:
             response.raise_for_status()
             size = 0
             with path.open("wb") as file:
@@ -119,7 +112,7 @@ class MediaProcessor:
                     file.write(chunk)
 
     async def _subtitles(self, url: str, session: aiohttp.ClientSession) -> str | None:
-        async with session.get(url, headers=self._headers(url), proxy=self._proxy(url)) as response:
+        async with session.get(url, headers=self._headers(url)) as response:
             response.raise_for_status()
             raw = await response.text(errors="replace")
         return vtt_to_text(raw) or None

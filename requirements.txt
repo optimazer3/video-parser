@@ -1,5 +1,6 @@
 aiogram>=3.31,<4
 aiohttp>=3.10
+aiohttp-socks>=0.10.1,<1.12
 aiosqlite>=0.22
 apify-client>=3.4,<4
 pydantic>=2.7

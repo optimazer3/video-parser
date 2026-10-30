@@ -262,7 +262,7 @@ async def on_text(message: Message, svc: Services) -> None:
     url = find_url(message.text)
     if url:
         try:
-            target = await resolve(url)
+            target = await resolve(url, svc.settings.proxy)
         except Exception:  # noqa: BLE001
             log.exception("resolve failed")
             target = None

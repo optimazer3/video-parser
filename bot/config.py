@@ -61,7 +61,7 @@ class Settings:
     llm_model: str
     llm_reasoning_effort: str | None
     transcribe_model: str | None
-    media_proxy: str | None
+    proxy: str | None
 
     tiktok_actor: str
     instagram_profile_actor: str
@@ -96,6 +96,9 @@ class Settings:
         missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", telegram_token), ("APIFY_TOKEN", apify_token)) if not v]
         if missing:
             raise SystemExit(f"Не заданы переменные окружения: {', '.join(missing)} (см. .env.example)")
+        proxy = _str("PROXY") or _str("MEDIA_PROXY")
+        if proxy and "://" not in proxy:
+            raise SystemExit(f"PROXY в .env должен начинаться со схемы, например socks5://{proxy} или http://{proxy}")
 
         return cls(
             telegram_token=telegram_token,
@@ -106,7 +109,7 @@ class Settings:
             llm_model=_str("LLM_MODEL", "anthropic/claude-sonnet-5.5"),
             llm_reasoning_effort=_str("LLM_REASONING_EFFORT", "high"),
             transcribe_model=_str("TRANSCRIBE_MODEL", "openai/gpt-4o-mini-transcribe"),
-            media_proxy=_str("MEDIA_PROXY"),
+            proxy=proxy,
             tiktok_actor=_str("APIFY_TIKTOK_ACTOR", "clockworks/tiktok-scraper"),
             instagram_profile_actor=_str("APIFY_INSTAGRAM_PROFILE_ACTOR", "apify/instagram-reel-scraper"),
             instagram_hashtag_actor=_str("APIFY_INSTAGRAM_HASHTAG_ACTOR", "apify/instagram-hashtag-scraper"),

@@ -7,14 +7,13 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-import aiohttp
-
 from .analyzer import Analyzer, ProfileReport, SingleReport
 from .apify_source import ApifyError, ApifySource
 from .config import Settings
 from .llm import LLMClient
 from .media import MediaProcessor, VideoMedia
 from .metrics import ProfileStats, pick_feed, profile_stats
+from .net import http_session
 from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK, Video
 from .storage import Storage
 
@@ -46,7 +45,7 @@ class Services:
         self.apify = ApifySource(settings)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key) if settings.llm_api_key else None
         self.media = MediaProcessor(
-            settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model, settings.media_proxy
+            settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model
         )
         self.analyzer = Analyzer(llm, settings.llm_model, settings.llm_reasoning_effort) if llm else None
         self._user_locks: dict[int, asyncio.Lock] = {}
@@ -129,7 +128,6 @@ class Services:
         return video, report
 
     async def _process_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
-        timeout = aiohttp.ClientTimeout(total=180)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with http_session(self.settings.proxy, timeout=180) as session:
             results = await asyncio.gather(*(self.media.process(v, session) for v in videos))
         return {v.key: m for v, m in zip(videos, results)}

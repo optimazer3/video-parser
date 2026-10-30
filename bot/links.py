@@ -6,9 +6,8 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-import aiohttp
-
 from .models import INSTAGRAM, TIKTOK
+from .net import http_session
 
 URL_RE = re.compile(r"https?://\S+|(?:www\.|vm\.|vt\.|m\.)?(?:tiktok|instagram)\.com/\S+", re.IGNORECASE)
 HANDLE_RE = re.compile(r"^@?([A-Za-z0-9._]{2,30})$")
@@ -69,13 +68,12 @@ def parse_handle(text: str) -> str | None:
     return None
 
 
-async def resolve(url: str) -> Target | None:
+async def resolve(url: str, proxy: str | None = None) -> Target | None:
     """Parse a link, following TikTok short links (vm.tiktok.com/...) to the real address."""
     host = (urlparse(url).hostname or "").lower()
     if host in TIKTOK_SHORT_HOSTS:
-        timeout = aiohttp.ClientTimeout(total=15)
         headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(url, allow_redirects=True) as response:
+        async with http_session(proxy, timeout=15) as session:
+            async with session.get(url, headers=headers, allow_redirects=True) as response:
                 url = str(response.url)
     return parse_url(url)
