@@ -32,10 +32,9 @@ Telegram-бот для автора контента про нейросети:
 
 Бот работает, пока запущен на компьютере. Сервер не нужен: бот сам опрашивает Telegram.
 
-### 1. Скачать код
+### 1. Скачать код через git
 
-[Скачать ZIP](https://github.com/optimazer3/video-parser/archive/refs/heads/claude/amazing-allen-odgb9c.zip)
-и распаковать, или через git:
+Нужен Git: на Windows — `winget install --id Git.Git -e` (потом открыть терминал заново), на macOS — `brew install git`.
 
 ```bash
 git clone -b claude/amazing-allen-odgb9c https://github.com/optimazer3/video-parser.git
@@ -75,6 +74,23 @@ brew install python ffmpeg
 
 Напишите боту `/start` — он ответит вашим Telegram ID. Впишите его в `ALLOWED_USER_IDS` в `.env`,
 остановите бота (Ctrl+C или закройте окно) и запустите снова.
+
+### Обновление через git
+
+Остановите бота (Ctrl+C) и в папке проекта выполните `.\update.bat` (macOS / Linux — `./update.sh`).
+Скрипт сделает `git pull` и обновит библиотеки. Потом запустите бота снова. `.env` и база с темами
+и кэшем (`data/`) в git не хранятся, обновление их не трогает.
+
+Если код раньше скачивали ZIP-архивом, подключите ту же папку к git один раз (в терминале, в папке проекта):
+
+```bash
+git init
+git remote add origin https://github.com/optimazer3/video-parser.git
+git fetch origin claude/amazing-allen-odgb9c
+git checkout -f -B claude/amazing-allen-odgb9c --track origin/claude/amazing-allen-odgb9c
+```
+
+После этого `git status` должен показать «nothing to commit»: `.env`, `.venv` и `data/` останутся на месте.
 
 ### Если Telegram или Instagram заблокированы
 
