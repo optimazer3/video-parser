@@ -118,6 +118,7 @@ async def main() -> None:
         await bot.set_my_commands([
             BotCommand(command="feed", description="Подборка залетающих роликов"),
             BotCommand(command="topics", description="Темы подборки"),
+        BotCommand(command="model", description="Нейросеть для разбора"),
             BotCommand(command="help", description="Что умеет бот"),
         ])
         log.info("Бот запущен. Остановить — Ctrl+C")

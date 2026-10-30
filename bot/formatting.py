@@ -212,4 +212,6 @@ def costs_line(costs: Costs) -> str:
     if costs.llm_models:
         models = ", ".join(escape(m) for m in costs.llm_models)
         parts.append(f"нейросеть ≈ {costs.llm_rub:.1f} ₽ ({models})")
-    return "<i>💸 " + " · ".join(parts) + "</i>"
+    lines = ["<i>💸 " + " · ".join(parts) + "</i>"] if parts else []
+    lines += [f"<i>{escape(note)}</i>" for note in costs.notes]
+    return "\n".join(lines)

@@ -70,6 +70,7 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_reasoning_effort: str | None
+    llm_video: bool
     transcribe_model: str | None
     proxy: str | None
 
@@ -123,6 +124,7 @@ class Settings:
             llm_base_url=_str("LLM_BASE_URL", "https://polza.ai/api/v1"),
             llm_model=_str("LLM_MODEL", "anthropic/claude-sonnet-5.5"),
             llm_reasoning_effort=_str("LLM_REASONING_EFFORT", "high"),
+            llm_video=_str("LLM_VIDEO_MODE", "auto").lower() not in ("off", "0", "false", "no"),
             transcribe_model=_str("TRANSCRIBE_MODEL", "openai/gpt-4o-mini-transcribe"),
             proxy=proxy,
             tiktok_actor=_str("APIFY_TIKTOK_ACTOR", "clockworks/tiktok-scraper"),

@@ -27,6 +27,7 @@ from . import formatting as fmt
 from . import topics as topic_list
 from .analyzer import AnalysisError
 from .apify_source import ApifyError, feed_cost_usd
+from .catalog import SUGGESTED
 from .links import find_url, parse_handle, resolve
 from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK
 from .service import Services
@@ -65,7 +66,12 @@ HELP = f"""<b>Что я умею</b>
 • /topics + #sora, нейросети для монтажа — добавить к текущим
 • /topics - #sora — удалить
 • /topics #нейросети, #chatgpt — заменить весь список
-• /topics reset — вернуть темы по умолчанию"""
+• /topics reset — вернуть темы по умолчанию
+
+<b>Нейросеть</b> (/model) — какая модель разбирает ролики, сколько стоит разбор, \
+режим «видео целиком» (модель смотрит ролик со звуком, а не 6 кадров).
+• /model provider/name — выбрать любую модель из каталога Polza
+• /model reset — вернуть LLM_MODEL из .env"""
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -178,7 +184,7 @@ async def run_exclusive(message: Message, svc: Services, user_id: int, job: Call
 async def analyze_profile(message: Message, svc: Services, user_id: int, platform: str, username: str) -> None:
     async def job() -> None:
         status = await StatusMessage.create(message, "⏳ Начинаю…")
-        result = await svc.analyze_profile(platform, username, status.update)
+        result = await svc.analyze_profile(user_id, platform, username, status.update)
         await status.delete()
         await send_long(message, [fmt.profile_overview(platform, username, result.stats)],
                         link_preview_options=NO_PREVIEW)
@@ -196,7 +202,7 @@ async def analyze_video(message: Message, svc: Services, user_id: int, **kwargs:
             await message.answer("ℹ️ Для разбора роликов нужен POLZA_API_KEY в .env.")
             return
         status = await StatusMessage.create(message, "⏳ Начинаю…")
-        video, report = await svc.analyze_video(progress=status.update, **kwargs)
+        video, report = await svc.analyze_video(user_id, progress=status.update, **kwargs)
         await status.delete()
         await send_long(message, fmt.single_report(report, video), link_preview_options=NO_PREVIEW)
 
@@ -318,6 +324,93 @@ async def on_topics_reply(message: Message, svc: Services) -> None:
     note = "Добавил: " + ", ".join(added) if added else "Эти темы уже есть."
     text, keyboard = await topics_view(svc, user_id, note)
     await message.answer(text, reply_markup=keyboard)
+
+
+def _rub(value: float | None) -> str:
+    return f"≈ {value:.1f} ₽" if value is not None else "цена неизвестна"
+
+
+async def model_view(svc: Services, user_id: int, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    current = await svc.model_for(user_id)
+    custom = await svc.storage.get_setting(user_id, "model") is not None
+    video_on = await svc.video_enabled(user_id)
+    info = await svc.catalog.get(current)
+
+    lines = [f"<i>{escape(note)}</i>\n"] if note else []
+    lines.append(f"<b>Модель разбора:</b> <code>{escape(current)}</code> ({'выбрана в боте' if custom else 'из .env'})")
+    if info:
+        price = f"Разбор аккаунта: {_rub(info.estimate_rub())}"
+        if info.video and video_on:
+            price += f", с видео целиком {_rub(info.estimate_rub(with_video=True))}"
+        lines.append(price)
+        lines.append("Видео целиком: " + ("умеет" if info.video else "не умеет — разбирает по кадрам"))
+    elif svc.catalog.loaded:
+        lines.append("⚠️ Такой модели нет в каталоге Polza — проверьте название.")
+    lines.append(f"Режим «видео целиком»: {'включён' if video_on else 'выключен'}")
+
+    lines.append("\n<b>Варианты</b> (цена разбора аккаунта):")
+    for model_id, label in SUGGESTED:
+        option = await svc.catalog.get(model_id)
+        lines.append(f"• <code>{model_id}</code> — {label}, {_rub(option.estimate_rub() if option else None)}")
+    lines.append("\nДругая модель: <code>/model provider/name</code> — список: polza.ai/api/v1/models")
+
+    rows = [[InlineKeyboardButton(text=("✅ " if model_id == current else "") + model_id, callback_data=f"md:set:{model_id}")]
+            for model_id, _ in SUGGESTED]
+    rows.append([
+        InlineKeyboardButton(text=f"🎞 Видео целиком: {'вкл' if video_on else 'выкл'}", callback_data="md:video"),
+        InlineKeyboardButton(text="↩️ Из .env", callback_data="md:reset"),
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def choose_model(svc: Services, user_id: int, model_id: str) -> str:
+    """Save the model if it fits the job; returns a note for the user."""
+    info = await svc.catalog.get(model_id)
+    if svc.catalog.loaded and info is None:
+        return f"Модели {model_id} нет в каталоге Polza — модель не изменена."
+    if info and not info.images:
+        return f"{model_id} не понимает картинки, а разбор строится на кадрах — модель не изменена."
+    await svc.storage.set_setting(user_id, "model", model_id)
+    return f"Теперь разбирает {model_id}."
+
+
+@router.message(Command("model"))
+async def cmd_model(message: Message, svc: Services, command: CommandObject) -> None:
+    user_id = message.from_user.id
+    args = (command.args or "").strip()
+    note = ""
+    if args.lower() in ("reset", "сброс"):
+        await svc.storage.set_setting(user_id, "model", None)
+        note = f"Вернул модель из .env: {svc.settings.llm_model}."
+    elif args:
+        note = await choose_model(svc, user_id, args.split()[0])
+    text, keyboard = await model_view(svc, user_id, note)
+    await message.answer(text, reply_markup=keyboard, link_preview_options=NO_PREVIEW)
+
+
+async def show_model(callback: CallbackQuery, svc: Services, note: str) -> None:
+    text, keyboard = await model_view(svc, callback.from_user.id, note)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, link_preview_options=NO_PREVIEW)
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=keyboard, link_preview_options=NO_PREVIEW)
+
+
+@router.callback_query(F.data.startswith("md:"))
+async def cb_model(callback: CallbackQuery, svc: Services) -> None:
+    user_id = callback.from_user.id
+    action = callback.data.removeprefix("md:")
+    if action.startswith("set:"):
+        note = await choose_model(svc, user_id, action.removeprefix("set:"))
+    elif action == "video":
+        enabled = not await svc.video_enabled(user_id)
+        await svc.storage.set_setting(user_id, "video", "on" if enabled else "off")
+        note = "Режим «видео целиком» " + ("включён: работает с моделями, которые умеют видео." if enabled else "выключен.")
+    else:
+        await svc.storage.set_setting(user_id, "model", None)
+        note = f"Вернул модель из .env: {svc.settings.llm_model}."
+    await callback.answer()
+    await show_model(callback, svc, note)
 
 
 @router.callback_query(F.data.startswith("an:"))

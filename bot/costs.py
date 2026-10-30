@@ -13,10 +13,11 @@ class Costs:
     llm_rub: float = 0.0
     llm_models: list[str] = field(default_factory=list)
     from_cache: bool = False
+    notes: list[str] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not self.apify_runs and not self.llm_models and not self.from_cache
+        return not self.apify_runs and not self.llm_models and not self.from_cache and not self.notes
 
 
 _current: ContextVar[Costs | None] = ContextVar("costs", default=None)
@@ -48,3 +49,9 @@ def mark_cached() -> None:
     costs = _current.get()
     if costs is not None:
         costs.from_cache = True
+
+
+def add_note(text: str) -> None:
+    costs = _current.get()
+    if costs is not None and text not in costs.notes:
+        costs.notes.append(text)

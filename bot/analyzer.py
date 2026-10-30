@@ -6,10 +6,11 @@ import base64
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
+from . import costs
 from .llm import LLMClient, LLMError
 from .media import VideoMedia
 from .metrics import ProfileStats
@@ -138,9 +139,15 @@ def describe_video(video: Video, number: int | None = None, ratio: float | None 
     return "\n".join(lines)
 
 
-def _video_blocks(video: Video, number: int, ratio: float | None, media: VideoMedia | None) -> list[dict]:
+def _video_blocks(
+    video: Video, number: int, ratio: float | None, media: VideoMedia | None, use_video: bool = False
+) -> list[dict]:
     blocks: list[dict] = [{"type": "text", "text": describe_video(video, number, ratio, media)}]
-    if media and media.frames:
+    if use_video and media and media.clip:
+        blocks.append({"type": "text", "text": f"Ролик №{number} целиком, со звуком:"})
+        data_url = "data:video/mp4;base64," + base64.standard_b64encode(media.clip).decode()
+        blocks.append({"type": "video_url", "video_url": {"url": data_url}})
+    elif media and media.frames:
         if media.cover_only:
             label = f"Видео ролика №{number} скачать не удалось, ниже только его обложка."
         else:
@@ -156,14 +163,20 @@ class AnalysisError(RuntimeError):
     pass
 
 
+# The API rejects a request it cannot take (e.g. video for a model or route without video) with these.
+VIDEO_REJECTED_STATUSES = {400, 413, 415, 422}
+
+
 @dataclass
 class Analyzer:
     llm: LLMClient
-    model: str
     reasoning_effort: str | None = None
+    # Models that rejected whole videos in this run of the bot: skip straight to frames for them.
+    video_rejected: dict[str, str] = field(default_factory=dict)
 
     async def profile_report(
-        self, platform: str, username: str, stats: ProfileStats, media: dict[str, VideoMedia]
+        self, platform: str, username: str, stats: ProfileStats, media: dict[str, VideoMedia],
+        *, model: str, use_video: bool = False,
     ) -> ProfileReport:
         intro = (
             f"Аккаунт @{username} в {PLATFORM_LABELS.get(platform, platform)}. Проанализировано последних роликов: "
@@ -173,34 +186,64 @@ class Analyzer:
             intro += f" Средний ER: {stats.mean_er * 100:.1f}%."
         if stats.posts_per_week:
             intro += f" Частота публикаций: ~{stats.posts_per_week:.1f} в неделю."
-        content: list[dict] = [{"type": "text", "text": intro + "\n\nЗАЛЕТЕВШИЕ РОЛИКИ (подробно, с кадрами):"}]
-        for i, video in enumerate(stats.hits, 1):
-            content += _video_blocks(video, i, stats.ratio(video), media.get(video.key))
 
-        if stats.flops:
-            flops = "\n\n".join(describe_video(v, ratio=stats.ratio(v)) for v in stats.flops)
-            content.append({"type": "text", "text": "СЛАБЫЕ РОЛИКИ ДЛЯ СРАВНЕНИЯ (только метаданные):\n\n" + flops})
+        def build(with_video: bool) -> list[dict]:
+            kind = "целиком, со звуком" if with_video else "с кадрами"
+            content: list[dict] = [{"type": "text", "text": f"{intro}\n\nЗАЛЕТЕВШИЕ РОЛИКИ (подробно, {kind}):"}]
+            for i, video in enumerate(stats.hits, 1):
+                content += _video_blocks(video, i, stats.ratio(video), media.get(video.key), with_video)
+            if stats.flops:
+                flops = "\n\n".join(describe_video(v, ratio=stats.ratio(v)) for v in stats.flops)
+                content.append({"type": "text", "text": "СЛАБЫЕ РОЛИКИ ДЛЯ СРАВНЕНИЯ (только метаданные):\n\n" + flops})
+            content.append({"type": "text", "text": (
+                "Сделай короткий разбор аккаунта. В videos — по одному объекту на каждый залетевший ролик "
+                "(video_number — его номер). Сравни хиты со слабыми роликами, но в ответ пиши только главные выводы."
+            )})
+            return content
 
-        content.append({"type": "text", "text": (
-            "Сделай короткий разбор аккаунта. В videos — по одному объекту на каждый залетевший ролик "
-            "(video_number — его номер). Сравни хиты со слабыми роликами, но в ответ пиши только главные выводы."
-        )})
-        return await self._ask(content, ProfileReport, PROFILE_TEMPLATE)
+        has_clips = any(m.clip for m in media.values())
+        return await self._ask_media(build, ProfileReport, PROFILE_TEMPLATE, model, use_video and has_clips)
 
-    async def single_report(self, video: Video, media: VideoMedia | None) -> SingleReport:
-        content = _video_blocks(video, 1, None, media)
-        content.append({"type": "text", "text": (
-            "Коротко разбери этот ролик: почему он набрал такие показатели и как сделать похожий без лица. "
-            "ideas — идеи роликов по мотивам, не копии этого."
-        )})
-        return await self._ask(content, SingleReport, SINGLE_TEMPLATE)
+    async def single_report(
+        self, video: Video, media: VideoMedia | None, *, model: str, use_video: bool = False
+    ) -> SingleReport:
+        def build(with_video: bool) -> list[dict]:
+            content = _video_blocks(video, 1, None, media, with_video)
+            content.append({"type": "text", "text": (
+                "Коротко разбери этот ролик: почему он набрал такие показатели и как сделать похожий без лица. "
+                "ideas — идеи роликов по мотивам, не копии этого."
+            )})
+            return content
 
-    async def _ask(self, content: list[dict], model: type[BaseModel], template: str):
+        has_clip = bool(media and media.clip)
+        return await self._ask_media(build, SingleReport, SINGLE_TEMPLATE, model, use_video and has_clip)
+
+    async def _ask_media(self, build, report_model: type[BaseModel], template: str, model: str, use_video: bool):
+        """Send whole videos when asked; if the API refuses them, redo the request with frames and say so."""
+        if use_video and model in self.video_rejected:
+            costs.add_note(f"🎞 {model} не принял видео ({self.video_rejected[model]}) — разбор по кадрам")
+            use_video = False
+        if not use_video:
+            return await self._ask(build(False), report_model, template, model)
+        try:
+            report = await self._ask(build(True), report_model, template, model)
+        except AnalysisError as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, LLMError) or cause.status not in VIDEO_REJECTED_STATUSES:
+                raise
+            log.warning("%s rejected video input, falling back to frames: %s", model, cause)
+            self.video_rejected[model] = str(cause)[:150]
+            costs.add_note(f"🎞 {model} не принял видео ({self.video_rejected[model]}) — разбор по кадрам")
+            return await self._ask(build(False), report_model, template, model)
+        costs.add_note("🎞 нейросеть смотрела ролики целиком, со звуком")
+        return report
+
+    async def _ask(self, content: list[dict], report_model: type[BaseModel], template: str, model: str):
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [*content, {"type": "text", "text": JSON_INSTRUCTION + template}]},
         ]
-        payload = {"model": self.model, "max_tokens": 32000, "messages": messages}
+        payload = {"model": model, "max_tokens": 32000, "messages": messages}
         if self.reasoning_effort:
             payload["reasoning"] = {"effort": self.reasoning_effort}
 
@@ -214,7 +257,7 @@ class Analyzer:
             if finish_reason == "content_filter":
                 raise AnalysisError("Нейросеть отказалась разбирать этот контент")
             try:
-                return model.model_validate(extract_json(text))
+                return report_model.model_validate(extract_json(text))
             except (ValueError, ValidationError) as exc:
                 log.warning("Bad analysis JSON (attempt %d): %s\n%s", attempt + 1, exc, text[:2000])
                 # Ask once more, showing the model its own answer and what was wrong with it.
@@ -223,4 +266,4 @@ class Analyzer:
                     {"role": "user", "content": f"Ответ не разобрался как JSON нужной структуры ({str(exc)[:300]}). "
                                                 "Пришли исправленный JSON целиком, без пояснений."},
                 ]
-        raise AnalysisError("Нейросеть вернула ответ в неожиданном формате — попробуйте ещё раз или другую LLM_MODEL")
+        raise AnalysisError("Нейросеть вернула ответ в неожиданном формате — попробуйте ещё раз или другую модель (/model)")

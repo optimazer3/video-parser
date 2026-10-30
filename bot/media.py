@@ -24,6 +24,9 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 HOOK_TIMESTAMPS = (0.0, 1.0, 2.5)
 # Speech recognition gets at most this much audio (Polza accepts request bodies up to ~15 MB).
 MAX_AUDIO_SECONDS = 600
+# Whole-video mode sends a small copy: the model samples about one frame per second anyway,
+# so 480p at 12 fps loses nothing and keeps five clips well under the request size limit.
+MAX_CLIP_SECONDS = 90
 
 
 @dataclass
@@ -34,6 +37,7 @@ class VideoMedia:
     duration: float | None = None
     error: str | None = None
     cover_only: bool = False  # the video itself could not be downloaded, frames hold just the cover
+    clip: bytes | None = None  # small MP4 with sound for models that watch the whole video
 
 
 class MediaProcessor:
@@ -54,7 +58,7 @@ class MediaProcessor:
         if not self.has_ffmpeg:
             log.warning("ffmpeg не найден — кадры из видео извлекаться не будут")
 
-    async def process(self, video: Video, session: aiohttp.ClientSession) -> VideoMedia:
+    async def process(self, video: Video, session: aiohttp.ClientSession, make_clip: bool = False) -> VideoMedia:
         media = VideoMedia(duration=video.duration)
         if video.transcript:
             media.transcript, media.transcript_source = video.transcript, "платформа"
@@ -81,6 +85,8 @@ class MediaProcessor:
                     media.frames = await extract_frames(path, media.duration, self.frames_per_video, Path(tmp))
                 except Exception as exc:  # noqa: BLE001
                     log.warning("frames failed for %s: %s", video.key, exc)
+                if make_clip:
+                    media.clip = await compress_clip(path, Path(tmp) / "clip.mp4")
 
             if not media.transcript and self.has_ffmpeg and self.llm and self.transcribe_model:
                 try:
@@ -240,6 +246,20 @@ async def probe_duration(path: Path) -> float | None:
         return float(out.decode().strip())
     except ValueError:
         return None
+
+
+async def compress_clip(source: Path, out: Path) -> bytes | None:
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(source), "-t", str(MAX_CLIP_SECONDS),
+        "-vf", "scale=-2:'min(480,ih)',fps=12", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+        "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", str(out),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await process.communicate()
+    if process.returncode != 0 or not out.exists():
+        log.warning("ffmpeg clip failed: %s", err.decode(errors="replace")[:200])
+        return None
+    return out.read_bytes()
 
 
 async def to_jpeg(source: Path, out: Path) -> bytes | None:

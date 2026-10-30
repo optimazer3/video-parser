@@ -18,7 +18,9 @@ ATTEMPTS = 3
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def _error_text(status: int, body: Any) -> str:
@@ -58,7 +60,7 @@ class LLMClient:
                         if response.status < 400:
                             raise LLMError(f"Неожиданный ответ API: {str(body)[:300]}")
                         if response.status not in RETRY_STATUSES or attempt == ATTEMPTS:
-                            raise LLMError(_error_text(response.status, body))
+                            raise LLMError(_error_text(response.status, body), status=response.status)
                         log.warning("%s -> %s, retry %d", path, response.status, attempt)
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
                 if attempt == ATTEMPTS:

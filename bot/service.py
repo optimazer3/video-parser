@@ -11,6 +11,7 @@ from . import costs
 from .analyzer import Analyzer, ProfileReport, SingleReport
 from .formatting import plural
 from .apify_source import ApifyError, ApifySource, feed_cost_usd
+from .catalog import ModelCatalog
 from .config import Settings
 from .llm import LLMClient
 from .media import MediaProcessor, VideoMedia, short_error, ytdlp_info
@@ -51,11 +52,28 @@ class Services:
         self.media = MediaProcessor(
             settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model, settings.proxy
         )
-        self.analyzer = Analyzer(llm, settings.llm_model, settings.llm_reasoning_effort) if llm else None
+        self.analyzer = Analyzer(llm, settings.llm_reasoning_effort) if llm else None
+        self.catalog = ModelCatalog(settings.llm_base_url)
         self._user_locks: dict[int, asyncio.Lock] = {}
 
     def user_lock(self, user_id: int) -> asyncio.Lock:
         return self._user_locks.setdefault(user_id, asyncio.Lock())
+
+    async def model_for(self, user_id: int) -> str:
+        """The model picked with /model, otherwise LLM_MODEL from .env."""
+        return await self.storage.get_setting(user_id, "model") or self.settings.llm_model
+
+    async def video_enabled(self, user_id: int) -> bool:
+        value = await self.storage.get_setting(user_id, "video")
+        return value == "on" if value else self.settings.llm_video
+
+    async def _llm_choice(self, user_id: int) -> tuple[str, bool]:
+        """(model, send whole videos?) — whole videos only when switched on and the model accepts video."""
+        model = await self.model_for(user_id)
+        if not await self.video_enabled(user_id):
+            return model, False
+        info = await self.catalog.get(model)
+        return model, bool(info and info.video)
 
     async def feed(self, user_id: int, progress: Progress = _noop) -> FeedResult:
         s = self.settings
@@ -96,7 +114,9 @@ class Services:
         fresh = sum(1 for v in videos if (v.age_days() or 0) <= s.feed_days)
         return FeedResult(picked, warnings, checked=len(videos), fresh=fresh)
 
-    async def analyze_profile(self, platform: str, username: str, progress: Progress = _noop) -> ProfileResult:
+    async def analyze_profile(
+        self, user_id: int, platform: str, username: str, progress: Progress = _noop
+    ) -> ProfileResult:
         s = self.settings
         label = PLATFORM_LABELS[platform]
         videos = await self.storage.get_profile(platform, username, s.profile_cache_hours)
@@ -115,14 +135,17 @@ class Services:
             return ProfileResult(stats, None)
 
         await progress(f"🎬 Скачиваю {len(stats.hits)} лучших роликов, вырезаю кадры и расшифровываю речь…")
-        media = await self._process_media(stats.hits)
+        model, use_video = await self._llm_choice(user_id)
+        media = await self._process_media(stats.hits, make_clip=use_video)
 
         await progress("🧠 Разбираю, почему ролики залетели… (1–3 минуты)")
-        report = await self.analyzer.profile_report(platform, username, stats, media)
+        report = await self.analyzer.profile_report(
+            platform, username, stats, media, model=model, use_video=use_video
+        )
         return ProfileResult(stats, report)
 
     async def analyze_video(
-        self, video: Video | None = None, *, platform: str | None = None, url: str | None = None,
+        self, user_id: int, video: Video | None = None, *, platform: str | None = None, url: str | None = None,
         progress: Progress = _noop,
     ) -> tuple[Video, SingleReport]:
         if video is None:
@@ -137,9 +160,10 @@ class Services:
             fresh = await self.apify.single_video(INSTAGRAM, video.url)
             video = fresh or video
         await progress("🎬 Скачиваю ролик, вырезаю кадры и расшифровываю речь…")
-        media = await self._process_media([video])
+        model, use_video = await self._llm_choice(user_id)
+        media = await self._process_media([video], make_clip=use_video)
         await progress("🧠 Разбираю ролик…")
-        report = await self.analyzer.single_report(video, media.get(video.key))
+        report = await self.analyzer.single_report(video, media.get(video.key), model=model, use_video=use_video)
         return video, report
 
     async def _tiktok_by_ytdlp(self, url: str) -> Video | None:
@@ -150,8 +174,8 @@ class Services:
             log.warning("yt-dlp info failed for %s: %s", url, short_error(exc))
             return None
 
-    async def _process_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
-        media = await self._download_media(videos)
+    async def _process_media(self, videos: list[Video], make_clip: bool = False) -> dict[str, VideoMedia]:
+        media = await self._download_media(videos, make_clip)
         # yt-dlp is free but can break when TikTok changes something; then pay Apify ~$0.005 per video.
         failed = [v for v in videos if v.platform == TIKTOK and not v.video_url and media[v.key].error]
         if failed:
@@ -166,12 +190,12 @@ class Services:
                 if stored.get(video.id) and stored[video.id].video_url:
                     video.video_url = stored[video.id].video_url
                     retry.append(video)
-            media.update(await self._download_media(retry))
+            media.update(await self._download_media(retry, make_clip))
         return media
 
-    async def _download_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
+    async def _download_media(self, videos: list[Video], make_clip: bool = False) -> dict[str, VideoMedia]:
         if not videos:
             return {}
         async with http_session(self.settings.proxy, timeout=180) as session:
-            results = await asyncio.gather(*(self.media.process(v, session) for v in videos))
+            results = await asyncio.gather(*(self.media.process(v, session, make_clip) for v in videos))
         return {v.key: m for v, m in zip(videos, results)}

@@ -184,8 +184,8 @@ def test_analyzer_retries_bad_json():
     videos = [make_video(i, 10_000 + i) for i in range(8)] + [make_video(50, 100_000)]
     stats = profile_stats(videos, top=3, now=NOW)
     llm = FakeLLM(['{"summary": "обрезано"', "```json\n" + json.dumps(REPORT) + "\n```"])
-    analyzer = Analyzer(llm, "anthropic/claude-sonnet-5.5", "high")
-    report = asyncio.run(analyzer.profile_report(TIKTOK, "ai_guru", stats, {}))
+    analyzer = Analyzer(llm, "high")
+    report = asyncio.run(analyzer.profile_report(TIKTOK, "ai_guru", stats, {}, model="anthropic/claude-sonnet-5.5"))
     assert isinstance(report, ProfileReport) and report.videos[0].hook == "h"
     first, second = llm.payloads
     assert first["reasoning"] == {"effort": "high"} and first["model"] == "anthropic/claude-sonnet-5.5"
@@ -193,9 +193,9 @@ def test_analyzer_retries_bad_json():
 
 
 def test_analyzer_gives_up_after_two_bad_answers():
-    analyzer = Analyzer(FakeLLM(["нет", "всё ещё нет"]), "m", None)
+    analyzer = Analyzer(FakeLLM(["нет", "всё ещё нет"]), None)
     with pytest.raises(AnalysisError):
-        asyncio.run(analyzer.single_report(make_video(1, 1000), None))
+        asyncio.run(analyzer.single_report(make_video(1, 1000), None, model="m"))
 
 
 def test_describe_video():
@@ -305,7 +305,7 @@ def test_tiktok_download_falls_back_to_apify():
     from bot.service import Services
 
     class FakeMedia:
-        async def process(self, video, session):
+        async def process(self, video, session, make_clip=False):
             if video.video_url:
                 return VideoMedia(frames=[(0.0, b"jpeg")])
             return VideoMedia(error="yt-dlp: blocked")
@@ -367,3 +367,65 @@ def test_topics_commands():
     assert apply_command(current, "+")[0] == current
     assert apply_command(current, "reset") == (None, "Вернул темы по умолчанию.")
     assert apply_command(current, "#a, b") == (["#a", "b"], "Заменил список тем.")
+
+
+def test_model_catalog_parsing():
+    from bot.catalog import parse_models
+
+    models = parse_models({"data": [
+        {"id": "google/gemini-3.8-flash", "architecture": {"input_modalities": ["text", "image", "video"]},
+         "top_provider": {"pricing": {"prompt_per_million": "43.8", "completion_per_million": "219.1"}}},
+        {"id": "openai/gpt-6.1-terra", "architecture": {"input_modalities": ["text", "image"]},
+         "top_provider": {"pricing": {"prompt_per_million": "57.2", "completion_per_million": "286.1"}}},
+        {"id": "broken"},
+    ]})
+    gemini, terra = models["google/gemini-3.8-flash"], models["openai/gpt-6.1-terra"]
+    assert gemini.video and gemini.images and not terra.video
+    assert terra.estimate_rub() == pytest.approx(2.86, abs=0.01)
+    assert gemini.estimate_rub(with_video=True) > gemini.estimate_rub()
+    assert models["broken"].estimate_rub() is None
+
+
+def test_video_mode_falls_back_to_frames():
+    from bot import costs
+    from bot.analyzer import SingleReport
+    from bot.llm import LLMError
+    from bot.media import VideoMedia
+
+    class VideoRejectingLLM(FakeLLM):
+        async def chat(self, payload):
+            parts = payload["messages"][1]["content"]
+            if any(p.get("type") == "video_url" for p in parts):
+                self.payloads.append("video")
+                raise LLMError("video_url не поддерживается", status=400)
+            return await super().chat(payload)
+
+    single = json.dumps({"video": REPORT["videos"][0], "ideas": ["i"]})
+    llm = VideoRejectingLLM([single, single])
+    analyzer = Analyzer(llm, "high")
+    media = VideoMedia(frames=[(0.0, b"jpeg")], clip=b"mp4")
+
+    async def run():
+        spent = costs.track()
+        first = await analyzer.single_report(make_video(1, 1000), media, model="google/gemini-3.8-flash", use_video=True)
+        second = await analyzer.single_report(make_video(1, 1000), media, model="google/gemini-3.8-flash", use_video=True)
+        return first, second, spent
+
+    first, second, spent = asyncio.run(run())
+    assert isinstance(first, SingleReport) and isinstance(second, SingleReport)
+    # The video was tried once; the retry and the next report went straight to frames.
+    assert llm.payloads[0] == "video" and llm.payloads.count("video") == 1
+    frame_parts = llm.payloads[1]["messages"][1]["content"]
+    assert any(p.get("type") == "image_url" for p in frame_parts)
+    assert any("не принял видео" in note for note in spent.notes)
+
+
+def test_video_mode_sends_clip():
+    from bot.analyzer import _video_blocks
+    from bot.media import VideoMedia
+
+    media = VideoMedia(frames=[(0.0, b"jpeg")], clip=b"mp4")
+    with_video = _video_blocks(make_video(1, 1000), 1, None, media, use_video=True)
+    assert with_video[-1]["type"] == "video_url" and with_video[-1]["video_url"]["url"].startswith("data:video/mp4;base64,")
+    frames = _video_blocks(make_video(1, 1000), 1, None, media, use_video=False)
+    assert frames[-1]["type"] == "image_url"
