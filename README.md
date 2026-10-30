@@ -57,46 +57,23 @@ winget install --id Gyan.FFmpeg -e
 brew install python ffmpeg
 ```
 
-### 3. Установить зависимости и заполнить настройки
+### 3. Установить зависимости и создать `.env`
 
-Открыть терминал в папке проекта.
+- **Windows** — дважды щёлкнуть `setup.bat`.
+- **macOS / Linux** — в терминале в папке проекта: `./setup.sh`
 
-Windows (PowerShell):
-
-```powershell
-py -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-copy .env.example .env
-notepad .env
-```
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-open -e .env
-```
+Скрипт создаст окружение `.venv`, поставит зависимости, скопирует `.env.example` в `.env`
+и проверит, что установлен ffmpeg. Запускать повторно безопасно: существующий `.env` он не трогает.
 
 В `.env` вписать `TELEGRAM_BOT_TOKEN`, `APIFY_TOKEN`, `POLZA_API_KEY`. `ALLOWED_USER_IDS` пока оставить пустым.
 
 ### 4. Запустить
 
-Windows:
-
-```powershell
-.venv\Scripts\python -m bot
-```
-
-macOS / Linux:
-
-```bash
-.venv/bin/python -m bot
-```
+- **Windows** — дважды щёлкнуть `start.bat`.
+- **macOS / Linux** — `./start.sh`
 
 Напишите боту `/start` — он ответит вашим Telegram ID. Впишите его в `ALLOWED_USER_IDS` в `.env`,
-остановите бота (Ctrl+C) и запустите снова.
+остановите бота (Ctrl+C или закройте окно) и запустите снова.
 
 ### Если Instagram заблокирован
 
