@@ -174,7 +174,7 @@ async def analyze_profile(message: Message, svc: Services, user_id: int, platfor
         await send_long(message, [fmt.profile_overview(platform, username, result.stats)],
                         link_preview_options=NO_PREVIEW)
         if result.report is None:
-            await message.answer("ℹ️ ANTHROPIC_API_KEY не задан — показываю только статистику, без разбора.")
+            await message.answer("ℹ️ POLZA_API_KEY не задан — показываю только статистику, без разбора.")
             return
         await send_long(message, fmt.profile_report(result.report, result.stats), link_preview_options=NO_PREVIEW)
 
@@ -183,8 +183,8 @@ async def analyze_profile(message: Message, svc: Services, user_id: int, platfor
 
 async def analyze_video(message: Message, svc: Services, user_id: int, **kwargs: Any) -> None:
     async def job() -> None:
-        if not svc.settings.anthropic_api_key:
-            await message.answer("ℹ️ Для разбора роликов нужен ANTHROPIC_API_KEY в .env.")
+        if svc.analyzer is None:
+            await message.answer("ℹ️ Для разбора роликов нужен POLZA_API_KEY в .env.")
             return
         status = await StatusMessage.create(message, "⏳ Начинаю…")
         video, report = await svc.analyze_video(progress=status.update, **kwargs)

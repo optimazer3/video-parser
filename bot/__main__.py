@@ -49,8 +49,8 @@ async def main() -> None:
     settings = Settings.from_env()
     if not settings.allowed_user_ids:
         log.warning("ALLOWED_USER_IDS пуст: бот ответит только вашим Telegram ID. Напишите ему /start.")
-    if not settings.anthropic_api_key:
-        log.warning("ANTHROPIC_API_KEY не задан: будет только статистика, без разбора роликов.")
+    if not settings.llm_api_key:
+        log.warning("POLZA_API_KEY не задан: будет только статистика, без разбора роликов.")
 
     storage = Storage(settings.db_path)
     await storage.open()

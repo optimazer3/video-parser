@@ -1,6 +1,10 @@
+import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
-from bot.analyzer import ProfileReport, SingleReport, _strict_schema, describe_video
+import pytest
+
+from bot.analyzer import AnalysisError, Analyzer, ProfileReport, describe_video, extract_json
 from bot.apify_source import split_topics
 from bot.formatting import feed_card, num, split_message
 from bot.links import find_url, parse_handle, parse_url
@@ -153,12 +157,48 @@ def test_formatting():
     assert all(len(c) <= 100 for c in split_message("слово " * 100 + "&amp;" * 30, limit=100))
 
 
-def test_strict_schemas_and_prompt():
-    for model in (ProfileReport, SingleReport):
-        schema = _strict_schema(model)
-        assert schema["additionalProperties"] is False
-        assert set(schema["required"]) == set(schema["properties"])
-        for definition in schema.get("$defs", {}).values():
-            assert definition["additionalProperties"] is False
+REPORT = {
+    "summary": "s", "hit_patterns": ["p"], "weak_spots": [], "recommendations": ["r"], "content_ideas": ["i"],
+    "videos": [{"video_number": 1, "why_it_worked": "w", "hook": "h", "structure": "st",
+                "what_to_improve": ["x"], "repeat_this": ["y"]}],
+}
+
+
+class FakeLLM:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.payloads = []
+
+    async def chat(self, payload):
+        self.payloads.append(json.loads(json.dumps(payload)))
+        return self.replies.pop(0), "stop"
+
+
+def test_extract_json():
+    assert extract_json('```json\n{"a": {"b": 1}}\n```') == {"a": {"b": 1}}
+    assert extract_json('Вот разбор:\n{"a": 1}\nУдачи!') == {"a": 1}
+    with pytest.raises(ValueError):
+        extract_json("без json")
+
+
+def test_analyzer_retries_bad_json():
+    videos = [make_video(i, 10_000 + i) for i in range(8)] + [make_video(50, 100_000)]
+    stats = profile_stats(videos, top=3, now=NOW)
+    llm = FakeLLM(['{"summary": "обрезано"', "```json\n" + json.dumps(REPORT) + "\n```"])
+    analyzer = Analyzer(llm, "anthropic/claude-sonnet-5.5", "high")
+    report = asyncio.run(analyzer.profile_report(TIKTOK, "ai_guru", stats, {}))
+    assert isinstance(report, ProfileReport) and report.videos[0].hook == "h"
+    first, second = llm.payloads
+    assert first["reasoning"] == {"effort": "high"} and first["model"] == "anthropic/claude-sonnet-5.5"
+    assert [m["role"] for m in second["messages"]] == ["system", "user", "assistant", "user"]
+
+
+def test_analyzer_gives_up_after_two_bad_answers():
+    analyzer = Analyzer(FakeLLM(["нет", "всё ещё нет"]), "m", None)
+    with pytest.raises(AnalysisError):
+        asyncio.run(analyzer.single_report(make_video(1, 1000), None))
+
+
+def test_describe_video():
     prompt = describe_video(tiktok_from_apify(TIKTOK_ITEM), 1, 4.2)
-    assert "×4.2" in prompt and "Сохранения" not in prompt and "сохранения: 10 000" in prompt
+    assert "×4.2" in prompt and "сохранения: 10 000" in prompt

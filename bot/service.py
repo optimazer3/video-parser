@@ -12,6 +12,7 @@ import aiohttp
 from .analyzer import Analyzer, ProfileReport, SingleReport
 from .apify_source import ApifyError, ApifySource
 from .config import Settings
+from .llm import LLMClient
 from .media import MediaProcessor, VideoMedia
 from .metrics import ProfileStats, pick_feed, profile_stats
 from .models import INSTAGRAM, PLATFORM_LABELS, TIKTOK, Video
@@ -43,8 +44,11 @@ class Services:
         self.settings = settings
         self.storage = storage
         self.apify = ApifySource(settings)
-        self.media = MediaProcessor(settings.apify_token, settings.frames_per_video, settings.whisper_model)
-        self.analyzer = Analyzer(settings.claude_model, settings.claude_effort, settings.anthropic_api_key)
+        llm = LLMClient(settings.llm_base_url, settings.llm_api_key) if settings.llm_api_key else None
+        self.media = MediaProcessor(
+            settings.apify_token, settings.frames_per_video, llm, settings.transcribe_model, settings.media_proxy
+        )
+        self.analyzer = Analyzer(llm, settings.llm_model, settings.llm_reasoning_effort) if llm else None
         self._user_locks: dict[int, asyncio.Lock] = {}
 
     def user_lock(self, user_id: int) -> asyncio.Lock:
@@ -92,7 +96,7 @@ class Services:
 
         stats = profile_stats(videos, top=s.analyze_top)
         await self.storage.save_videos(stats.hits)
-        if not s.anthropic_api_key:
+        if self.analyzer is None:
             return ProfileResult(stats, None)
 
         await progress(f"🎬 Скачиваю {len(stats.hits)} лучших роликов, вырезаю кадры и расшифровываю речь…")

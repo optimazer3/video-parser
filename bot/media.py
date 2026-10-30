@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from .llm import LLMClient
 from .models import Video
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ MAX_VIDEO_BYTES = 150 * 1024 * 1024
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 # The hook lives in the first seconds, so frames are denser there.
 HOOK_TIMESTAMPS = (0.0, 1.0, 2.5)
+# Speech recognition gets at most this much audio (Polza accepts request bodies up to ~15 MB).
+MAX_AUDIO_SECONDS = 600
 
 
 @dataclass
@@ -33,12 +36,19 @@ class VideoMedia:
 
 
 class MediaProcessor:
-    def __init__(self, apify_token: str, frames_per_video: int = 6, whisper_model: str | None = None):
+    def __init__(
+        self,
+        apify_token: str,
+        frames_per_video: int = 6,
+        llm: LLMClient | None = None,
+        transcribe_model: str | None = None,
+        proxy: str | None = None,
+    ):
         self.apify_token = apify_token
         self.frames_per_video = frames_per_video
-        self.whisper_model = whisper_model
-        self._whisper = None
-        self._whisper_lock = asyncio.Lock()
+        self.llm = llm
+        self.transcribe_model = transcribe_model
+        self.proxy = proxy
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         if not self.has_ffmpeg:
             log.warning("ffmpeg не найден — кадры из видео извлекаться не будут")
@@ -75,13 +85,18 @@ class MediaProcessor:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("frames failed for %s: %s", video.key, exc)
 
-            if not media.transcript and self.whisper_model:
+            if not media.transcript and self.has_ffmpeg and self.llm and self.transcribe_model:
                 try:
-                    media.transcript = await self._transcribe(path)
-                    media.transcript_source = "распознавание речи (Whisper)"
+                    media.transcript = await self._transcribe(path, Path(tmp))
+                    media.transcript_source = "распознавание речи"
                 except Exception as exc:  # noqa: BLE001
-                    log.warning("whisper failed for %s: %s", video.key, exc)
+                    log.warning("transcription failed for %s: %s", video.key, exc)
         return media
+
+    def _proxy(self, url: str) -> str | None:
+        # Apify storage is reachable directly; the proxy is meant for blocked CDNs such as Instagram's.
+        host = urlparse(url).hostname or ""
+        return None if host.endswith("apify.com") else self.proxy
 
     def _headers(self, url: str) -> dict[str, str]:
         headers = {"User-Agent": USER_AGENT}
@@ -93,7 +108,7 @@ class MediaProcessor:
         return headers
 
     async def _download(self, url: str, path: Path, session: aiohttp.ClientSession) -> None:
-        async with session.get(url, headers=self._headers(url)) as response:
+        async with session.get(url, headers=self._headers(url), proxy=self._proxy(url)) as response:
             response.raise_for_status()
             size = 0
             with path.open("wb") as file:
@@ -104,23 +119,16 @@ class MediaProcessor:
                     file.write(chunk)
 
     async def _subtitles(self, url: str, session: aiohttp.ClientSession) -> str | None:
-        async with session.get(url, headers=self._headers(url)) as response:
+        async with session.get(url, headers=self._headers(url), proxy=self._proxy(url)) as response:
             response.raise_for_status()
             raw = await response.text(errors="replace")
         return vtt_to_text(raw) or None
 
-    async def _transcribe(self, path: Path) -> str | None:
-        async with self._whisper_lock:
-            return await asyncio.to_thread(self._transcribe_sync, str(path))
-
-    def _transcribe_sync(self, path: str) -> str | None:
-        if self._whisper is None:
-            from faster_whisper import WhisperModel  # optional dependency
-
-            self._whisper = WhisperModel(self.whisper_model, device="cpu", compute_type="int8")
-        segments, _info = self._whisper.transcribe(path, vad_filter=True)
-        text = " ".join(segment.text.strip() for segment in segments).strip()
-        return text or None
+    async def _transcribe(self, video_path: Path, workdir: Path) -> str | None:
+        audio = await extract_audio(video_path, workdir)
+        if audio is None:
+            return None  # no sound track
+        return await self.llm.transcribe(audio, self.transcribe_model)
 
 
 def vtt_to_text(raw: str) -> str:
@@ -160,6 +168,21 @@ async def probe_duration(path: Path) -> float | None:
         return float(out.decode().strip())
     except ValueError:
         return None
+
+
+async def extract_audio(path: Path, workdir: Path) -> bytes | None:
+    """Mono 16 kHz MP3 — small enough to send for speech recognition."""
+    out = workdir / "audio.mp3"
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "16000",
+        "-b:a", "48k", "-t", str(MAX_AUDIO_SECONDS), str(out),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await process.communicate()
+    if process.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        log.debug("ffmpeg audio failed: %s", err.decode(errors="replace")[:200])
+        return None
+    return out.read_bytes()
 
 
 async def extract_frames(path: Path, duration: float | None, count: int, workdir: Path) -> list[tuple[float, bytes]]:

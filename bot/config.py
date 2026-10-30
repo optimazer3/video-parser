@@ -54,11 +54,14 @@ def _json(name: str) -> dict:
 class Settings:
     telegram_token: str
     apify_token: str
-    anthropic_api_key: str | None
+    llm_api_key: str | None
     allowed_user_ids: frozenset[int]
 
-    claude_model: str
-    claude_effort: str
+    llm_base_url: str
+    llm_model: str
+    llm_reasoning_effort: str | None
+    transcribe_model: str | None
+    media_proxy: str | None
 
     tiktok_actor: str
     instagram_profile_actor: str
@@ -81,7 +84,6 @@ class Settings:
     analyze_top: int
     frames_per_video: int
 
-    whisper_model: str | None
     digest_time: str | None
     timezone: str
     db_path: str
@@ -98,10 +100,13 @@ class Settings:
         return cls(
             telegram_token=telegram_token,
             apify_token=apify_token,
-            anthropic_api_key=_str("ANTHROPIC_API_KEY"),
+            llm_api_key=_str("POLZA_API_KEY"),
             allowed_user_ids=frozenset(int(x) for x in _list("ALLOWED_USER_IDS")),
-            claude_model=_str("CLAUDE_MODEL", "claude-opus-5-5"),
-            claude_effort=_str("CLAUDE_EFFORT", "high"),
+            llm_base_url=_str("LLM_BASE_URL", "https://polza.ai/api/v1"),
+            llm_model=_str("LLM_MODEL", "anthropic/claude-sonnet-5.5"),
+            llm_reasoning_effort=_str("LLM_REASONING_EFFORT", "high"),
+            transcribe_model=_str("TRANSCRIBE_MODEL", "openai/gpt-4o-mini-transcribe"),
+            media_proxy=_str("MEDIA_PROXY"),
             tiktok_actor=_str("APIFY_TIKTOK_ACTOR", "clockworks/tiktok-scraper"),
             instagram_profile_actor=_str("APIFY_INSTAGRAM_PROFILE_ACTOR", "apify/instagram-reel-scraper"),
             instagram_hashtag_actor=_str("APIFY_INSTAGRAM_HASHTAG_ACTOR", "apify/instagram-hashtag-scraper"),
@@ -120,7 +125,6 @@ class Settings:
             profile_videos=_int("PROFILE_VIDEOS", 40),
             analyze_top=_int("ANALYZE_TOP", 5),
             frames_per_video=_int("FRAMES_PER_VIDEO", 6),
-            whisper_model=_str("WHISPER_MODEL"),
             digest_time=_str("DIGEST_TIME"),
             timezone=_str("TIMEZONE", "Europe/Moscow"),
             db_path=_str("DB_PATH", "data/bot.sqlite3"),
