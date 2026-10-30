@@ -1,0 +1,164 @@
+from datetime import datetime, timedelta, timezone
+
+from bot.analyzer import ProfileReport, SingleReport, _strict_schema, describe_video
+from bot.apify_source import split_topics
+from bot.formatting import feed_card, num, split_message
+from bot.links import find_url, parse_handle, parse_url
+from bot.media import frame_timestamps, vtt_to_text
+from bot.metrics import pick_feed, profile_stats
+from bot.models import INSTAGRAM, TIKTOK, Video, instagram_from_apify, tiktok_from_apify
+
+NOW = datetime(2026, 10, 30, tzinfo=timezone.utc)
+
+TIKTOK_ITEM = {
+    "id": "7312345678901234567",
+    "text": "Эта нейросеть делает презентацию за 30 секунд #нейросети #ai",
+    "createTimeISO": "2026-10-28T10:00:00.000Z",
+    "authorMeta": {"name": "ai_guru", "fans": 12000},
+    "musicMeta": {"musicName": "original sound", "musicAuthor": "ai_guru", "musicOriginal": True},
+    "webVideoUrl": "https://www.tiktok.com/@ai_guru/video/7312345678901234567",
+    "videoMeta": {
+        "duration": 34,
+        "coverUrl": "https://example.com/cover.jpg",
+        "subtitleLinks": [
+            {"language": "eng-US", "downloadLink": "https://example.com/en.vtt"},
+            {"language": "rus-RU", "downloadLink": "https://example.com/ru.vtt"},
+        ],
+    },
+    "diggCount": 85000, "shareCount": 3400, "playCount": 1200000, "collectCount": 10000, "commentCount": 1200,
+    "hashtags": [{"name": "нейросети"}, {"name": "ai"}],
+    "mediaUrls": ["https://api.apify.com/v2/key-value-stores/x/records/video.mp4"],
+}
+
+INSTAGRAM_ITEM = {
+    "id": "3456",
+    "type": "Video",
+    "shortCode": "C1abcDEF",
+    "caption": "3 нейросети, которые заменят дизайнера",
+    "hashtags": ["нейросети"],
+    "url": "https://www.instagram.com/p/C1abcDEF/",
+    "commentsCount": 300,
+    "likesCount": -1,
+    "videoPlayCount": 500000,
+    "videoViewCount": 200000,
+    "timestamp": "2026-10-25T08:00:00.000Z",
+    "ownerUsername": "neuro.design",
+    "videoDuration": 28.5,
+    "videoUrl": "https://scontent.cdninstagram.com/v.mp4",
+    "musicInfo": {"artist_name": "neuro.design", "song_name": "Original audio", "uses_original_audio": True},
+}
+
+
+def make_video(i: int, views: int, days_ago: float = 10, author: str = "a") -> Video:
+    return Video(
+        platform=TIKTOK, id=str(i), url=f"https://www.tiktok.com/@{author}/video/{i}", author=author,
+        caption=f"video {i}", created_at=NOW - timedelta(days=days_ago), views=views, likes=views // 20,
+        comments=views // 500, shares=views // 400, saves=views // 300,
+    )
+
+
+def test_tiktok_from_apify():
+    video = tiktok_from_apify(TIKTOK_ITEM)
+    assert video.key == "tiktok:7312345678901234567"
+    assert video.author == "ai_guru"
+    assert video.views == 1_200_000 and video.saves == 10_000
+    assert video.subtitle_url == "https://example.com/ru.vtt"
+    assert video.video_url.endswith("video.mp4")
+    assert video.hashtags == ["нейросети", "ai"]
+    assert video.created_at == datetime(2026, 10, 28, 10, tzinfo=timezone.utc)
+    assert "оригинальный звук" in video.music
+    assert tiktok_from_apify({"error": "Post not found"}) is None
+    assert tiktok_from_apify({**TIKTOK_ITEM, "isSlideshow": True}) is None
+
+
+def test_instagram_from_apify():
+    video = instagram_from_apify(INSTAGRAM_ITEM)
+    assert video.platform == INSTAGRAM
+    assert video.views == 500_000  # plays win over legacy views
+    assert video.likes == 0  # hidden likes (-1) are treated as unknown
+    assert video.author == "neuro.design"
+    assert instagram_from_apify({**INSTAGRAM_ITEM, "type": "Image", "productType": "feed", "videoUrl": None}) is None
+
+
+def test_video_roundtrip():
+    video = tiktok_from_apify(TIKTOK_ITEM)
+    assert Video.from_dict(video.to_dict()) == video
+
+
+def test_parse_links():
+    assert parse_url("https://www.tiktok.com/@ai_guru?lang=ru").username == "ai_guru"
+    target = parse_url("https://www.tiktok.com/@ai_guru/video/7312345678901234567?is_from_webapp=1")
+    assert (target.kind, target.url) == ("video", "https://www.tiktok.com/@ai_guru/video/7312345678901234567")
+    assert parse_url("https://instagram.com/neuro.design/").username == "neuro.design"
+    reel = parse_url("https://www.instagram.com/reel/C1abcDEF/?igsh=xyz")
+    assert (reel.platform, reel.kind, reel.url) == (INSTAGRAM, "video", "https://www.instagram.com/reel/C1abcDEF/")
+    assert parse_url("https://www.instagram.com/explore/tags/ai/") is None
+    assert find_url("глянь instagram.com/neuro.design плиз") == "https://instagram.com/neuro.design"
+    assert find_url("вот: https://vm.tiktok.com/ZMabc123/.") == "https://vm.tiktok.com/ZMabc123/"
+    assert parse_handle("@ai_guru") == "ai_guru"
+    assert parse_handle("привет") is None
+
+
+def test_split_topics():
+    assert split_topics(["#нейросети", "chat gpt лайфхаки", " #ai tools "]) == (
+        ["нейросети", "aitools"], ["chat gpt лайфхаки"],
+    )
+
+
+def test_profile_stats_finds_hits_and_flops():
+    videos = [make_video(i, 10_000 + i * 100) for i in range(10)]
+    videos += [make_video(100, 90_000), make_video(101, 55_000), make_video(102, 1_000), make_video(103, 500, days_ago=1)]
+    stats = profile_stats(videos, top=5, now=NOW)
+    assert [v.id for v in stats.hits[:2]] == ["100", "101"]
+    assert stats.hit_count == 2
+    assert len(stats.hits) == 3  # at least three videos are always analysed
+    assert stats.flops[0].id == "102"
+    assert "103" not in {v.id for v in stats.flops}  # too fresh to be called a flop
+    assert stats.ratio(stats.hits[0]) > 8
+
+
+def test_pick_feed_filters_and_ranks():
+    videos = [
+        make_video(1, 500_000, days_ago=1, author="x"),
+        make_video(2, 50_000, days_ago=2, author="y"),
+        make_video(3, 5_000, days_ago=1, author="z"),  # too few views
+        make_video(4, 900_000, days_ago=30, author="w"),  # too old
+        make_video(5, 400_000, days_ago=1, author="x"),
+        make_video(6, 300_000, days_ago=1, author="x"),  # third video of the same author
+        make_video(7, 600_000, days_ago=1, author="seen"),
+    ]
+    picked = pick_feed(videos, seen={"tiktok:7"}, days=7, min_views=20_000, min_likes=500, limit=10, now=NOW)
+    assert [v.id for v in picked] == ["1", "5", "2"]
+
+
+def test_frame_timestamps():
+    assert frame_timestamps(30, 6) == [0.0, 1.0, 2.5, 11.8, 20.7, 29.5]
+    assert frame_timestamps(None, 6) == [0.0, 1.0, 2.5]
+    short = frame_timestamps(2, 6)
+    assert short and max(short) < 2
+
+
+def test_vtt_to_text():
+    raw = "WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nПривет, это <c>нейросеть</c>\n\n2\n00:00:02.000 --> 00:00:03.000\nПривет, это нейросеть\nкоторая всё делает\n"
+    assert vtt_to_text(raw) == "Привет, это нейросеть которая всё делает"
+
+
+def test_formatting():
+    assert num(1_234_567) == "1.2M" and num(85_000) == "85K" and num(999) == "999"
+    card = feed_card(tiktok_from_apify(TIKTOK_ITEM), 1)
+    assert "@ai_guru" in card and "1.2M" in card and "ER" in card
+    text = "\n".join(["строка " + "x" * 50] * 200)
+    chunks = split_message(text, limit=1000)
+    assert all(len(c) <= 1000 for c in chunks) and "\n".join(chunks) == text
+    assert all(len(c) <= 100 for c in split_message("слово " * 100 + "&amp;" * 30, limit=100))
+
+
+def test_strict_schemas_and_prompt():
+    for model in (ProfileReport, SingleReport):
+        schema = _strict_schema(model)
+        assert schema["additionalProperties"] is False
+        assert set(schema["required"]) == set(schema["properties"])
+        for definition in schema.get("$defs", {}).values():
+            assert definition["additionalProperties"] is False
+    prompt = describe_video(tiktok_from_apify(TIKTOK_ITEM), 1, 4.2)
+    assert "×4.2" in prompt and "Сохранения" not in prompt and "сохранения: 10 000" in prompt
