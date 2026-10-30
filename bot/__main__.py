@@ -16,6 +16,7 @@ from aiogram.types import BotCommand
 
 from . import costs
 from . import formatting as fmt
+from .apify_source import feed_cost_usd
 from .config import Settings
 from .handlers import AccessMiddleware, router, send_feed
 from .net import safe_proxy
@@ -88,6 +89,10 @@ async def main() -> None:
     log.info("Настройки из %s", settings.env_path or "переменных окружения (файл .env не найден)")
     for key in settings.env_duplicates:
         log.warning("В .env ключ %s записан несколько раз — действует последнее значение. Оставьте одну строку.", key)
+    if settings.digest_time:
+        daily = feed_cost_usd(list(settings.default_topics), settings.feed_results_per_topic, settings.feed_platforms)
+        log.info("Ежедневная подборка в %s: Apify ≈ $%.2f в день (≈ $%.0f в месяц). Выключить — DIGEST_TIME= в .env",
+                 settings.digest_time, daily, daily * 30)
     if settings.llm_api_key:
         log.info("Модель разбора: %s · расшифровка речи: %s", settings.llm_model, settings.transcribe_model or "выключена")
     else:

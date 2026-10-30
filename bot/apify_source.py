@@ -15,7 +15,7 @@ from .models import INSTAGRAM, TIKTOK, Video, instagram_from_apify, tiktok_from_
 
 log = logging.getLogger(__name__)
 
-# Video files are downloaded for free with yt-dlp (see media.py), so Apify only collects metadata.
+# Video files are downloaded for free with yt-dlp (see media.py); Apify downloads only as a fallback.
 NO_DOWNLOADS = {
     "shouldDownloadVideos": False,
     "shouldDownloadCovers": False,
@@ -23,6 +23,9 @@ NO_DOWNLOADS = {
     "shouldDownloadSlideshowImages": False,
 }
 PER_RESULT_MODELS = ("PAY_PER_EVENT", "PRICE_PER_DATASET_ITEM")
+# Prices of the default actors as the Apify console showed them in October 2026 (for estimates only).
+RESULT_PRICE_USD = {TIKTOK: 0.0037, INSTAGRAM: 0.0026}
+START_PRICE_USD = 0.001
 
 
 class ApifyError(RuntimeError):
@@ -41,6 +44,12 @@ def split_topics(topics: tuple[str, ...] | list[str]) -> tuple[list[str], list[s
         elif topic:
             queries.append(topic)
     return hashtags, queries
+
+
+def feed_cost_usd(topics: list[str], per_topic: int, platforms: tuple[str, ...] | list[str]) -> float:
+    """Expected Apify bill of one feed: every collected video is a paid result, old ones included."""
+    count = sum(1 for t in topics if t.strip().lstrip("#"))
+    return sum(RESULT_PRICE_USD.get(p, 0.004) * per_topic * count + START_PRICE_USD for p in platforms)
 
 
 def run_cost_usd(run: Any, item_count: int) -> float:
@@ -128,6 +137,12 @@ class ApifySource:
         items = await self._run(self.settings.tiktok_actor, run_input, 1)
         return [v for v in map(tiktok_from_apify, items) if v]
 
+    async def tiktok_media(self, urls: list[str]) -> list[Video]:
+        """Fallback when yt-dlp cannot download: Apify stores the files (~$0.005 per video)."""
+        run_input = {"postURLs": urls, **NO_DOWNLOADS, "shouldDownloadVideos": True, **self.settings.tiktok_extra_input}
+        items = await self._run(self.settings.tiktok_actor, run_input, len(urls))
+        return [v for v in map(tiktok_from_apify, items) if v]
+
     # --- Instagram --------------------------------------------------------
 
     async def instagram_topics(self, topics: list[str], per_topic: int) -> list[Video]:
@@ -169,4 +184,4 @@ class ApifySource:
         return videos[0] if videos else None
 
 
-__all__ = ["ApifyError", "ApifySource", "INSTAGRAM", "TIKTOK", "run_cost_usd", "split_topics"]
+__all__ = ["ApifyError", "ApifySource", "INSTAGRAM", "TIKTOK", "feed_cost_usd", "run_cost_usd", "split_topics"]

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 
 from . import costs
 from .analyzer import Analyzer, ProfileReport, SingleReport
-from .apify_source import ApifyError, ApifySource
+from .formatting import plural
+from .apify_source import ApifyError, ApifySource, feed_cost_usd
 from .config import Settings
 from .llm import LLMClient
 from .media import MediaProcessor, VideoMedia, short_error, ytdlp_info
@@ -31,6 +32,8 @@ async def _noop(_: str) -> None:
 class FeedResult:
     videos: list[Video]
     warnings: list[str] = field(default_factory=list)
+    checked: int = 0  # videos collected (and paid for) on Apify
+    fresh: int = 0  # of them, published within FEED_DAYS
 
 
 @dataclass
@@ -57,7 +60,13 @@ class Services:
     async def feed(self, user_id: int, progress: Progress = _noop) -> FeedResult:
         s = self.settings
         topics = await self.storage.get_topics(user_id, s.default_topics)
-        await progress(f"🔎 Ищу свежие ролики по темам: {', '.join(topics)}")
+        platforms = [p for p in (TIKTOK, INSTAGRAM) if p in s.feed_platforms]
+        estimate = feed_cost_usd(topics, s.feed_results_per_topic, platforms)
+        await progress(
+            f"🔎 Ищу ролики: {plural(len(topics), 'тема', 'темы', 'тем')} × {s.feed_results_per_topic} шт. в "
+            f"{' и '.join(PLATFORM_LABELS[p] for p in platforms)} (Apify ≈ ${estimate:.2f})\n"
+            f"Темы: {', '.join(topics)}"
+        )
 
         jobs = {}
         if TIKTOK in s.feed_platforms:
@@ -84,7 +93,8 @@ class Services:
             limit=s.feed_size,
         )
         await self.storage.save_videos(picked)
-        return FeedResult(picked, warnings)
+        fresh = sum(1 for v in videos if (v.age_days() or 0) <= s.feed_days)
+        return FeedResult(picked, warnings, checked=len(videos), fresh=fresh)
 
     async def analyze_profile(self, platform: str, username: str, progress: Progress = _noop) -> ProfileResult:
         s = self.settings
@@ -141,6 +151,27 @@ class Services:
             return None
 
     async def _process_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
+        media = await self._download_media(videos)
+        # yt-dlp is free but can break when TikTok changes something; then pay Apify ~$0.005 per video.
+        failed = [v for v in videos if v.platform == TIKTOK and not v.video_url and media[v.key].error]
+        if failed:
+            log.info("yt-dlp failed for %d TikTok videos, downloading them through Apify", len(failed))
+            try:
+                stored = {v.id: v for v in await self.apify.tiktok_media([v.url for v in failed])}
+            except ApifyError as exc:
+                log.warning("Apify download failed: %s", exc)
+                return media
+            retry = []
+            for video in failed:
+                if stored.get(video.id) and stored[video.id].video_url:
+                    video.video_url = stored[video.id].video_url
+                    retry.append(video)
+            media.update(await self._download_media(retry))
+        return media
+
+    async def _download_media(self, videos: list[Video]) -> dict[str, VideoMedia]:
+        if not videos:
+            return {}
         async with http_session(self.settings.proxy, timeout=180) as session:
             results = await asyncio.gather(*(self.media.process(v, session) for v in videos))
         return {v.key: m for v, m in zip(videos, results)}

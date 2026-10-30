@@ -287,3 +287,41 @@ def test_tiktok_from_ytdlp():
     assert (video.key, video.author, video.views, video.shares) == ("tiktok:7312", "ai_guru", 120000, 150)
     assert video.hashtags == ["нейросети", "ai"] and video.music == "ai_guru — original sound"
     assert video.saves is None and video.created_at.year == 2025
+
+
+def test_feed_cost_usd():
+    from bot.apify_source import feed_cost_usd
+
+    # The run from the Apify bill: 6 topics x 30 videos on both platforms.
+    topics = ["#нейросети", "#нейросеть", "#искусственныйинтеллект", "#chatgpt", "#aitools", "нейросети для работы"]
+    assert feed_cost_usd(topics, 30, ["tiktok", "instagram"]) == pytest.approx(1.136, abs=0.01)
+    assert feed_cost_usd(["#нейросети", "#chatgpt", "#aitools", "x"], 10, ["tiktok", "instagram"]) < 0.26
+    assert feed_cost_usd(["#a", ""], 10, ["tiktok"]) == pytest.approx(0.038)
+
+
+def test_tiktok_download_falls_back_to_apify():
+    from types import SimpleNamespace as NS
+
+    from bot.media import VideoMedia
+    from bot.service import Services
+
+    class FakeMedia:
+        async def process(self, video, session):
+            if video.video_url:
+                return VideoMedia(frames=[(0.0, b"jpeg")])
+            return VideoMedia(error="yt-dlp: blocked")
+
+    class FakeApify:
+        def __init__(self):
+            self.urls = []
+
+        async def tiktok_media(self, urls):
+            self.urls += urls
+            return [Video(platform=TIKTOK, id="1", url=urls[0], author="a", video_url="https://api.apify.com/v.mp4")]
+
+    svc = Services.__new__(Services)
+    svc.settings, svc.media, svc.apify = NS(proxy=None), FakeMedia(), FakeApify()
+    videos = [make_video(1, 1000), make_video(2, 2000)]
+    media = asyncio.run(svc._process_media(videos))
+    assert svc.apify.urls == [videos[0].url, videos[1].url]  # one Apify run for both
+    assert media["tiktok:1"].frames and media["tiktok:2"].error  # 2 was not returned by Apify

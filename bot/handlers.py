@@ -137,16 +137,18 @@ async def send_feed(bot: Bot, chat_id: int, user_id: int, svc: Services, *, quie
 
     for warning in result.warnings:
         await bot.send_message(chat_id, f"⚠️ {escape(warning)}")
+    checked = (f"Проверено роликов: {result.checked}, из них свежих "
+               f"(за {svc.settings.feed_days} дн.): {result.fresh}.")
     if not result.videos:
         if not quiet:
             await bot.send_message(
                 chat_id,
-                "Новых роликов, подходящих под фильтры, не нашлось. Попробуйте другие темы (/topics) "
-                "или уменьшите FEED_MIN_VIEWS.",
+                f"Новых роликов, подходящих под фильтры, не нашлось. {checked} Попробуйте другие темы "
+                "(/topics) или уменьшите FEED_MIN_VIEWS.",
             )
         return
 
-    await bot.send_message(chat_id, f"<b>🔥 Подборка — найдено: {len(result.videos)}</b>")
+    await bot.send_message(chat_id, f"<b>🔥 Подборка — {len(result.videos)}</b>\n<i>{checked}</i>")
     for i, video in enumerate(result.videos, 1):
         await bot.send_message(chat_id, fmt.feed_card(video, i), reply_markup=video_button(video.key))
     await svc.storage.mark_seen(user_id, [v.key for v in result.videos])

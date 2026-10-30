@@ -10,10 +10,9 @@ from dataclasses import dataclass
 
 from dotenv import find_dotenv, load_dotenv
 
+# Every topic is paid on Apify (FEED_RESULTS_PER_TOPIC videos per platform), so keep the list short.
 DEFAULT_TOPICS = (
     "#нейросети",
-    "#нейросеть",
-    "#искусственныйинтеллект",
     "#chatgpt",
     "#aitools",
     "нейросети для работы",
@@ -140,7 +139,7 @@ class Settings:
             feed_size=_int("FEED_SIZE", 10),
             feed_min_views=_int("FEED_MIN_VIEWS", 20_000),
             feed_min_likes=_int("FEED_MIN_LIKES", 500),
-            feed_results_per_topic=_int("FEED_RESULTS_PER_TOPIC", 20),
+            feed_results_per_topic=_int("FEED_RESULTS_PER_TOPIC", 10),
             profile_videos=_int("PROFILE_VIDEOS", 30),
             profile_cache_hours=_float("PROFILE_CACHE_HOURS", 24),
             analyze_top=_int("ANALYZE_TOP", 5),

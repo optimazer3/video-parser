@@ -13,6 +13,17 @@ TELEGRAM_LIMIT = 4096
 PLATFORM_ICONS = {TIKTOK: "🎵", "instagram": "📸"}
 
 
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """plural(4, "тема", "темы", "тем") -> "4 темы"."""
+    if n % 10 == 1 and n % 100 != 11:
+        word = one
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = few
+    else:
+        word = many
+    return f"{n} {word}"
+
+
 def num(n: int | float | None) -> str:
     if n is None:
         return "—"
