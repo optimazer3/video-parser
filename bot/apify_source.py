@@ -122,10 +122,11 @@ class ApifySource:
         items = await self._run(self.settings.tiktok_actor, run_input, per_topic * max(len(topics), 1))
         return [v for v in map(tiktok_from_apify, items) if v]
 
-    async def tiktok_profile(self, username: str, limit: int) -> list[Video]:
+    async def tiktok_profile(self, username: str, limit: int, sorting: str = "latest") -> list[Video]:
         run_input = {
             "profiles": [username],
             "resultsPerPage": limit,
+            "profileSorting": sorting,  # latest / popular / oldest
             **NO_DOWNLOADS,
             **self.settings.tiktok_extra_input,
         }
@@ -178,6 +179,12 @@ class ApifySource:
         if platform == TIKTOK:
             return await self.tiktok_profile(username, limit)
         return await self.instagram_profile(username, limit)
+
+    async def profile_popular(self, platform: str, username: str, limit: int) -> list[Video]:
+        """The account's all-time most popular videos (TikTok only: the Reels actor cannot sort)."""
+        if platform != TIKTOK or limit <= 0:
+            return []
+        return await self.tiktok_profile(username, limit, sorting="popular")
 
     async def single_video(self, platform: str, url: str) -> Video | None:
         videos = await (self.tiktok_post(url) if platform == TIKTOK else self.instagram_post(url))

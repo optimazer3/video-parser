@@ -263,16 +263,36 @@ def test_profile_cache(tmp_path):
     async def run():
         storage = Storage(str(tmp_path / "db.sqlite3"))
         await storage.open()
-        videos = [make_video(1, 1000), make_video(2, 5000)]
+        latest, popular = [make_video(1, 1000), make_video(2, 5000)], [make_video(9, 900_000)]
         assert await storage.get_profile(TIKTOK, "AI_Guru", 24) is None
-        await storage.save_profile(TIKTOK, "ai_guru", videos)
+        await storage.save_profile(TIKTOK, "ai_guru", latest, popular)
         cached = await storage.get_profile(TIKTOK, "AI_Guru", 24)
         disabled = await storage.get_profile(TIKTOK, "ai_guru", 0)
+        # A row written by the previous version (a plain list) still loads.
+        await storage.db.execute("UPDATE profiles SET data = ?", (json.dumps([v.to_dict() for v in latest]),))
+        old = await storage.get_profile(TIKTOK, "ai_guru", 24)
         await storage.close()
-        return cached, disabled
+        return cached, disabled, old
 
-    cached, disabled = asyncio.run(run())
-    assert [v.views for v in cached] == [1000, 5000] and disabled is None
+    (latest, popular), disabled, old = asyncio.run(run())
+    assert [v.views for v in latest] == [1000, 5000] and popular[0].views == 900_000 and disabled is None
+    assert len(old[0]) == 2 and old[1] == []
+
+
+def test_hits_mix_fresh_and_all_time():
+    from bot.metrics import ALL_TIME, FRESH
+
+    latest = [make_video(i, 10_000 + i * 100) for i in range(20)]
+    latest += [make_video(100, 120_000, days_ago=2), make_video(101, 70_000, days_ago=4), make_video(102, 45_000)]
+    popular = [make_video(900, 3_000_000, days_ago=200), make_video(901, 1_500_000, days_ago=300),
+               make_video(902, 900_000, days_ago=400), make_video(100, 120_000, days_ago=2)]
+    stats = profile_stats(latest, top=5, popular=popular, now=NOW)
+    assert [v.id for v in stats.hits] == ["100", "101", "102", "900", "901"]
+    assert [stats.kind(v) for v in stats.hits] == [FRESH] * 3 + [ALL_TIME] * 2
+    assert stats.ratio(stats.hits[3]) > 100  # measured against the latest videos' median
+    assert len(stats.videos) == 23 and len(stats.all_videos) == 26  # duplicate 100 counted once
+    # Without the popular list everything is fresh.
+    assert all(stats.kind(v) == FRESH for v in profile_stats(latest, top=5, now=NOW).hits)
 
 
 def test_tiktok_from_ytdlp():
@@ -469,3 +489,17 @@ def test_report_caption_and_prompt_in_chat():
     assert len(visible) <= 1024 and "$0.11" in caption and "целиком" in caption
     chat = video_analysis(report.videos[0], None)
     assert "<code>Сделай HTML-анимацию" in chat
+
+
+def test_report_marks_kinds_and_lists_everything():
+    from bot.formatting import pair_analyses
+    from bot.report import build_markdown
+
+    latest = [make_video(i, 10_000 + i * 100) for i in range(10)] + [make_video(100, 120_000, days_ago=2)]
+    stats = profile_stats(latest, top=3, popular=[make_video(900, 3_000_000, days_ago=200)], now=NOW)
+    analyses = [dict(REPORT["videos"][0], video_number=n) for n in (7, 7, 9)]  # nonsense numbers from the model
+    report = ProfileReport.model_validate(dict(REPORT, videos=analyses))
+    pairs = pair_analyses(report.videos, stats.hits)
+    assert [a.video_number for a, _ in pairs] == [1, 2, 3] and [v.id for _, v in pairs] == [h.id for h in stats.hits]
+    md = build_markdown(TIKTOK, "neuro.lab", stats, report)
+    assert "*свежий хит*" in md and "*топ за всё время*" in md and "1 самых популярных" in md

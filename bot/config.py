@@ -92,6 +92,7 @@ class Settings:
     feed_results_per_topic: int
 
     profile_videos: int
+    profile_popular: int
     report_format: str
     profile_cache_hours: float
     analyze_top: int
@@ -144,6 +145,7 @@ class Settings:
             feed_min_likes=_int("FEED_MIN_LIKES", 500),
             feed_results_per_topic=_int("FEED_RESULTS_PER_TOPIC", 10),
             profile_videos=_int("PROFILE_VIDEOS", 30),
+            profile_popular=_int("PROFILE_POPULAR", 5),
             report_format=(_str("REPORT_FORMAT", "pdf") or "pdf").lower(),
             profile_cache_hours=_float("PROFILE_CACHE_HOURS", 24),
             analyze_top=_int("ANALYZE_TOP", 5),

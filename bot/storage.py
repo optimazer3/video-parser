@@ -78,8 +78,10 @@ class Storage:
             row = await cursor.fetchone()
         return Video.from_dict(json.loads(row[0])) if row else None
 
-    async def get_profile(self, platform: str, username: str, max_age_hours: float) -> list[Video] | None:
-        """Videos of a profile scraped less than max_age_hours ago (saves a paid Apify run)."""
+    async def get_profile(
+        self, platform: str, username: str, max_age_hours: float
+    ) -> tuple[list[Video], list[Video]] | None:
+        """(latest, all-time popular) videos of a profile scraped less than max_age_hours ago (saves Apify runs)."""
         if max_age_hours <= 0:
             return None
         async with self.db.execute(
@@ -87,13 +89,18 @@ class Storage:
             (f"{platform}:{username.lower()}", int(time.time() - max_age_hours * 3600)),
         ) as cursor:
             row = await cursor.fetchone()
-        return [Video.from_dict(item) for item in json.loads(row[0])] if row else None
+        if not row:
+            return None
+        data = json.loads(row[0])
+        if isinstance(data, list):  # cache written before the popular list existed
+            data = {"latest": data, "popular": []}
+        return ([Video.from_dict(v) for v in data["latest"]], [Video.from_dict(v) for v in data["popular"]])
 
-    async def save_profile(self, platform: str, username: str, videos: list[Video]) -> None:
+    async def save_profile(self, platform: str, username: str, latest: list[Video], popular: list[Video]) -> None:
+        data = {"latest": [v.to_dict() for v in latest], "popular": [v.to_dict() for v in popular]}
         await self.db.execute(
             "INSERT OR REPLACE INTO profiles (key, data, saved_at) VALUES (?, ?, ?)",
-            (f"{platform}:{username.lower()}", json.dumps([v.to_dict() for v in videos], ensure_ascii=False),
-             int(time.time())),
+            (f"{platform}:{username.lower()}", json.dumps(data, ensure_ascii=False), int(time.time())),
         )
         await self.db.commit()
 

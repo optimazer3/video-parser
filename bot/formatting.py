@@ -162,14 +162,21 @@ def pack(blocks: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
     return messages
 
 
+def pair_analyses(analyses: list[VideoAnalysis], hits: list[Video]) -> list[tuple[VideoAnalysis, Video | None]]:
+    """Match the model's analyses to the hits by video_number; if the numbers are off, by order."""
+    numbers = [a.video_number for a in analyses]
+    if len(set(numbers)) == len(numbers) and all(1 <= n <= len(hits) for n in numbers):
+        return [(a, hits[a.video_number - 1]) for a in analyses]
+    return [(a.model_copy(update={"video_number": i}), hits[i - 1] if i <= len(hits) else None)
+            for i, a in enumerate(analyses, 1)]
+
+
 def profile_report(report: ProfileReport, stats: ProfileStats) -> list[str]:
     head = f"🧠 <b>Главное</b>\n{escape(report.summary)}"
     if clean_items(report.takeaways, MAX_TAKEAWAYS):
         head += "\n" + _bullets(report.takeaways, MAX_TAKEAWAYS)
     blocks = [head]
-    for analysis in report.videos:
-        index = analysis.video_number - 1
-        video = stats.hits[index] if 0 <= index < len(stats.hits) else None
+    for analysis, video in pair_analyses(report.videos, stats.hits):
         blocks.append(video_analysis(analysis, video, stats.ratio(video) if video else None))
     blocks.append(_ideas(report.ideas))
     return pack(blocks)
@@ -220,13 +227,19 @@ def costs_line(costs: Costs) -> str:
     return "\n".join(lines)
 
 
+def _period_short(stats: ProfileStats) -> str:
+    period = stats.period
+    return f" (с {period[0]:%d.%m} по {period[1]:%d.%m})" if period else ""
+
+
 def report_caption(platform: str, username: str, stats: ProfileStats, report: ProfileReport, costs: Costs | None) -> str:
     """Short text under the report file: the numbers, the main conclusion and the cost (caption limit is 1024)."""
     label = PLATFORM_LABELS.get(platform, platform)
     summary = short(report.summary, 450)
     lines = [
         f"📊 <b>@{escape(username)} · {label}</b> — полный разбор в файле",
-        f"Роликов: {len(stats.videos)} · медиана {num(stats.median_views)} · залетевших: {stats.hit_count}",
+        f"Роликов: {len(stats.videos)}{_period_short(stats)} · медиана {num(stats.median_views)} · "
+        f"залетевших: {stats.hit_count}",
         "",
         f"🧠 {escape(summary)}",
     ]

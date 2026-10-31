@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 from . import costs
 from .llm import LLMClient, LLMError
 from .media import VideoMedia
-from .metrics import ProfileStats
+from .metrics import ALL_TIME, ProfileStats
 from .models import PLATFORM_LABELS, Video
 
 log = logging.getLogger(__name__)
@@ -151,9 +151,15 @@ def describe_video(video: Video, number: int | None = None, ratio: float | None 
 
 
 def _video_blocks(
-    video: Video, number: int, ratio: float | None, media: VideoMedia | None, use_video: bool = False
+    video: Video, number: int, ratio: float | None, media: VideoMedia | None, use_video: bool = False,
+    kind: str | None = None,
 ) -> list[dict]:
-    blocks: list[dict] = [{"type": "text", "text": describe_video(video, number, ratio, media)}]
+    text = describe_video(video, number, ratio, media)
+    if kind == ALL_TIME:
+        text += "\nЭто один из самых популярных роликов аккаунта за всё время, не из последних."
+    elif kind:
+        text += "\nЭто свежий хит из последних роликов аккаунта."
+    blocks: list[dict] = [{"type": "text", "text": text}]
     if use_video and media and media.clip:
         blocks.append({"type": "text", "text": f"Ролик №{number} целиком, со звуком:"})
         data_url = "data:video/mp4;base64," + base64.standard_b64encode(media.clip).decode()
@@ -202,13 +208,16 @@ class Analyzer:
             kind = "целиком, со звуком" if with_video else "с кадрами"
             content: list[dict] = [{"type": "text", "text": f"{intro}\n\nЗАЛЕТЕВШИЕ РОЛИКИ (подробно, {kind}):"}]
             for i, video in enumerate(stats.hits, 1):
-                content += _video_blocks(video, i, stats.ratio(video), media.get(video.key), with_video)
+                content += _video_blocks(
+                    video, i, stats.ratio(video), media.get(video.key), with_video, kind=stats.kind(video)
+                )
             if stats.flops:
                 flops = "\n\n".join(describe_video(v, ratio=stats.ratio(v)) for v in stats.flops)
                 content.append({"type": "text", "text": "СЛАБЫЕ РОЛИКИ ДЛЯ СРАВНЕНИЯ (только метаданные):\n\n" + flops})
             content.append({"type": "text", "text": (
-                "Сделай короткий разбор аккаунта. В videos — по одному объекту на каждый залетевший ролик "
-                "(video_number — его номер). Сравни хиты со слабыми роликами, но в ответ пиши только главные выводы."
+                f"Сделай короткий разбор аккаунта. В videos — ровно {len(stats.hits)} объектов, по одному на каждый "
+                f"ролик №1–№{len(stats.hits)} выше (video_number — его номер). Слабые ролики в videos не включай, "
+                "сравни с ними хиты только в выводах. Пиши только главное."
             )})
             return content
 

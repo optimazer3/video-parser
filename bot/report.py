@@ -10,9 +10,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .analyzer import ProfileReport, VideoAnalysis
-from .formatting import MAX_IDEAS, MAX_IMPROVE, MAX_STEPS, MAX_TAKEAWAYS, clean_items, num
+from .formatting import MAX_IDEAS, MAX_IMPROVE, MAX_STEPS, MAX_TAKEAWAYS, clean_items, num, pair_analyses
 from .media import VideoMedia
-from .metrics import ProfileStats, estimated_views
+from .metrics import ALL_TIME, ProfileStats, estimated_views
 from .models import PLATFORM_LABELS, Video
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ ACCENT = (108, 92, 231)
 TEXT = (33, 33, 41)
 MUTED = (120, 120, 135)
 BOX = (243, 241, 252)
+# Section labels: a coloured badge each, so "why", "hook", "how" stand out at a glance.
+WHY, HOOK, HOW, PROMPT, IMPROVE = (108, 92, 231), (230, 126, 34), (0, 150, 110), (41, 128, 185), (214, 48, 49)
+FRESH_BADGE, ALL_TIME_BADGE = (0, 150, 110), (230, 126, 34)
 HOOK_FRAMES = 3  # frames from the first seconds shown under each video
 
 # Emoji and pictographs are not in ordinary fonts: drop them from the PDF instead of printing empty boxes.
@@ -58,9 +61,21 @@ def file_name(platform: str, username: str, extension: str) -> str:
     return f"razbor_{safe}_{platform}_{datetime.now():%Y-%m-%d}.{extension}"
 
 
-def _video_for(analysis: VideoAnalysis, stats: ProfileStats) -> Video | None:
-    index = analysis.video_number - 1
-    return stats.hits[index] if 0 <= index < len(stats.hits) else None
+def _period(stats: ProfileStats) -> str:
+    period = stats.period
+    text = f"последние {len(stats.videos)} роликов"
+    if period:
+        text += f" ({period[0]:%d.%m.%Y} – {period[1]:%d.%m.%Y})"
+    extra = len(stats.all_videos) - len(stats.videos)
+    if extra:
+        text += f" + {extra} самых популярных за всё время"
+    return text
+
+
+def _kind_label(stats: ProfileStats, video: Video | None) -> str:
+    if video is None:
+        return ""
+    return "топ за всё время" if stats.kind(video) == ALL_TIME else "свежий хит"
 
 
 def _stat_tiles(stats: ProfileStats) -> list[tuple[str, str]]:
@@ -113,9 +128,23 @@ def build_pdf(
         line(text, size=size, bold=True, color=ACCENT, height=7.5)
         pdf.ln(1)
 
-    def label(text: str) -> None:
-        pdf.ln(1.5)
-        line(text, size=10, bold=True, color=MUTED, height=5.2)
+    def badge(text: str, color, size: float = 10, height: float = 6.5) -> float:
+        """A filled rounded label at the current position; returns its width."""
+        pdf.set_font("Body", "B", size)
+        w = pdf.get_string_width(text) + 7
+        x, y = pdf.get_x(), pdf.get_y()
+        pdf.set_fill_color(*color)
+        pdf.rect(x, y, w, height, style="F", round_corners=True, corner_radius=1.6)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(w, height, text, align="C")
+        return w
+
+    def label(text: str, color) -> None:
+        pdf.ln(3)
+        if pdf.get_y() > pdf.page_break_trigger - 20:
+            pdf.add_page()
+        badge(text, color)
+        pdf.ln(8)
 
     def items(values: list[str], numbered: bool = False) -> None:
         for i, value in enumerate(values, 1):
@@ -126,21 +155,18 @@ def build_pdf(
             pdf.set_text_color(*TEXT)
             pdf.multi_cell(0, 5.6, _text(value), align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    def boxed(title: str, text: str) -> None:
-        pdf.ln(1.5)
+    def boxed_text(text: str) -> None:
         pdf.set_fill_color(*BOX)
-        pdf.set_font("Body", "B", 9.5)
-        pdf.set_text_color(*ACCENT)
-        pdf.multi_cell(0, 6, "  " + title, fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font("Body", "", 10)
         pdf.set_text_color(*TEXT)
-        pdf.multi_cell(0, 5.4, _text(text), fill=True, align="L", padding=(0, 3, 2.5, 3),
+        pdf.multi_cell(0, 5.4, _text(text), fill=True, align="L", padding=(2.5, 3, 2.5, 3),
                        new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     # Title and numbers
     pdf.add_page()
     line(f"Разбор аккаунта @{username}", size=22, bold=True, height=10)
-    line(f"{PLATFORM_LABELS.get(platform, platform)} · {datetime.now():%d.%m.%Y}", size=10.5, color=MUTED)
+    line(f"{PLATFORM_LABELS.get(platform, platform)} · {datetime.now():%d.%m.%Y} · собрано: {_period(stats)}",
+         size=10.5, color=MUTED)
     pdf.set_draw_color(*ACCENT)
     pdf.set_line_width(0.8)
     pdf.line(pdf.l_margin, pdf.get_y() + 2, pdf.l_margin + 30, pdf.get_y() + 2)
@@ -188,8 +214,7 @@ def build_pdf(
         pdf.cell(0, 6, caption, link=video.url, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     # One section per analysed video; a new page only when the section would not start comfortably
-    for analysis in report.videos:
-        video = _video_for(analysis, stats)
+    for analysis, video in pair_analyses(report.videos, stats.hits):
         if pdf.get_y() > pdf.page_break_trigger - 110:
             pdf.add_page()
         else:
@@ -203,6 +228,13 @@ def build_pdf(
             title += f" · {num(estimated_views(video))} просмотров · ×{stats.ratio(video):.1f} к медиане"
         line(title, size=15, bold=True, color=ACCENT, height=8)
         if video:
+            kind = _kind_label(stats, video)
+            when = f"  опубликован {video.created_at:%d.%m.%Y}" if video.created_at else ""
+            badge(kind, ALL_TIME_BADGE if stats.kind(video) == ALL_TIME else FRESH_BADGE, size=8.5, height=5.2)
+            pdf.set_font("Body", "", 8.5)
+            pdf.set_text_color(*MUTED)
+            pdf.cell(0, 5.2, when, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.ln(1)
             line(video.url, size=8.5, color=MUTED, height=4.5, link=video.url)
             if video.caption.strip():
                 line("«" + " ".join(video.caption.split())[:220] + "»", size=9.5, color=MUTED, height=5)
@@ -227,25 +259,52 @@ def build_pdf(
                 pdf.cell(frame_w, 4, f"{second:g} с", align="C")
             pdf.set_xy(pdf.l_margin, y + frame_h + 6)
 
-        label("ПОЧЕМУ ЗАЛЕТЕЛ")
+        label("ПОЧЕМУ ЗАЛЕТЕЛ", WHY)
         line(analysis.why)
-        label("ХУК")
+        label("ХУК", HOOK)
         line(analysis.hook)
         steps = clean_items(analysis.how_to_make, MAX_STEPS)
         if steps:
-            label("КАК СДЕЛАТЬ БЕЗ ЛИЦА")
+            label("КАК СДЕЛАТЬ БЕЗ ЛИЦА", HOW)
             items(steps, numbered=True)
         if analysis.key_prompt.strip():
-            boxed("Промпт для Claude / Gemini", analysis.key_prompt)
+            label("ПРОМПТ ДЛЯ CLAUDE / GEMINI", PROMPT)
+            boxed_text(analysis.key_prompt)
         improve = clean_items(analysis.improve, MAX_IMPROVE)
         if improve:
-            label("УЛУЧШИТЬ")
+            label("УЛУЧШИТЬ", IMPROVE)
             items(improve)
 
     ideas = clean_items(report.ideas, MAX_IDEAS)
     if ideas:
         heading("Идеи роликов")
         items(ideas, numbered=True)
+    # Everything that was collected, so it is clear what the hits were picked from
+    heading("Все собранные ролики")
+    line(f"Собрано: {_period(stats)}. Медиана просмотров последних роликов: {num(stats.median_views)}. "
+         "Звёздочкой отмечены разобранные выше.", size=9, color=MUTED, height=4.8)
+    pdf.ln(2)
+    hit_keys = {v.key for v in stats.hits}
+    columns = (("", 6), ("Дата", 20), ("Просмотры", 22), ("Лайки", 18), ("× медиана", 20))
+    pdf.set_font("Body", "B", 8.5)
+    pdf.set_text_color(*MUTED)
+    for name, w in columns:
+        pdf.cell(w, 5.5, name)
+    pdf.cell(0, 5.5, "Подпись", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    for video in sorted(stats.all_videos, key=estimated_views, reverse=True):
+        star = video.key in hit_keys
+        pdf.set_font("Body", "B" if star else "", 8.5)
+        pdf.set_text_color(*(ACCENT if star else TEXT))
+        cells = ("★" if star else "", f"{video.created_at:%d.%m.%y}" if video.created_at else "—",
+                 num(estimated_views(video)), num(video.likes), f"×{stats.ratio(video):.1f}")
+        for (_, w), value in zip(columns, cells):
+            pdf.cell(w, 5.2, value)
+        caption = _text(" ".join(video.caption.split())) or "без подписи"
+        room = pdf.l_margin + width - pdf.get_x()
+        while caption and pdf.get_string_width(caption) > room:
+            caption = caption[:-2] + "…"
+        pdf.cell(0, 5.2, caption, link=video.url, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
     if footer:
         pdf.ln(6)
         line(footer, size=8.5, color=MUTED, height=4.5)
@@ -257,7 +316,7 @@ def build_pdf(
 
 def build_markdown(platform: str, username: str, stats: ProfileStats, report: ProfileReport, footer: str = "") -> str:
     out = [f"# Разбор аккаунта @{username}", "",
-           f"{PLATFORM_LABELS.get(platform, platform)} · {datetime.now():%d.%m.%Y}", ""]
+           f"{PLATFORM_LABELS.get(platform, platform)} · {datetime.now():%d.%m.%Y} · собрано: {_period(stats)}", ""]
     out += [" · ".join(f"**{name}:** {value}" for name, value in _stat_tiles(stats)), ""]
     out += ["## Главное", "", report.summary, ""]
     out += [f"- {t}" for t in clean_items(report.takeaways, MAX_TAKEAWAYS)] + [""]
@@ -266,14 +325,13 @@ def build_markdown(platform: str, username: str, stats: ProfileStats, report: Pr
         caption = " ".join(video.caption.split())[:70] or "без подписи"
         out.append(f"{i}. [{caption}]({video.url}) — {num(estimated_views(video))} просм., ×{stats.ratio(video):.1f}")
     out.append("")
-    for analysis in report.videos:
-        video = _video_for(analysis, stats)
+    for analysis, video in pair_analyses(report.videos, stats.hits):
         title = f"## Ролик №{analysis.video_number}"
         if video:
             title += f" · {num(estimated_views(video))} просмотров · ×{stats.ratio(video):.1f} к медиане"
         out += [title, ""]
         if video:
-            out += [video.url, ""]
+            out += [f"*{_kind_label(stats, video)}* · {video.url}", ""]
         out += [f"**Почему залетел.** {analysis.why}", "", f"**Хук.** {analysis.hook}", ""]
         steps = clean_items(analysis.how_to_make, MAX_STEPS)
         if steps:

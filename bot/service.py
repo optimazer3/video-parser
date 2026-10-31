@@ -121,17 +121,14 @@ class Services:
     ) -> ProfileResult:
         s = self.settings
         label = PLATFORM_LABELS[platform]
-        videos = await self.storage.get_profile(platform, username, s.profile_cache_hours)
-        if videos:
+        cached = await self.storage.get_profile(platform, username, s.profile_cache_hours)
+        if cached:
+            videos, popular = cached
             costs.mark_cached()
         else:
-            await progress(f"⏳ Собираю последние {s.profile_videos} роликов @{username} ({label})…")
-            videos = await self.apify.profile(platform, username, s.profile_videos)
-            if not videos:
-                raise ApifyError(f"Не нашёл роликов у @{username} — проверьте ник и что аккаунт открытый")
-            await self.storage.save_profile(platform, username, videos)
+            videos, popular = await self._scrape_profile(platform, username, progress)
 
-        stats = profile_stats(videos, top=s.analyze_top)
+        stats = profile_stats(videos, top=s.analyze_top, popular=popular)
         await self.storage.save_videos(stats.hits)
         if self.analyzer is None:
             return ProfileResult(stats, None)
@@ -145,6 +142,33 @@ class Services:
             platform, username, stats, media, model=model, use_video=use_video
         )
         return ProfileResult(stats, report, media, model)
+
+    async def _scrape_profile(
+        self, platform: str, username: str, progress: Progress
+    ) -> tuple[list[Video], list[Video]]:
+        s = self.settings
+        extra = f" и {s.profile_popular} самых популярных" if platform == TIKTOK and s.profile_popular > 0 else ""
+        await progress(f"⏳ Собираю последние {s.profile_videos}{extra} роликов @{username} ({PLATFORM_LABELS[platform]})…")
+        latest, popular = await asyncio.gather(
+            self.apify.profile(platform, username, s.profile_videos),
+            self.apify.profile_popular(platform, username, s.profile_popular),
+            return_exceptions=True,
+        )
+        if isinstance(latest, Exception):
+            raise latest
+        if isinstance(popular, Exception):
+            log.warning("popular videos of %s failed: %s", username, popular)
+            costs.add_note(f"Топ роликов за всё время не собрался ({str(popular)[:100]}) — разбор только по последним")
+            popular = []
+        if not latest:
+            raise ApifyError(f"Не нашёл роликов у @{username} — проверьте ник и что аккаунт открытый")
+        if len(latest) < max(5, s.profile_videos // 2):
+            # TikTok sometimes gives Apify only part of a profile; such a result must not stick in the cache.
+            costs.add_note(f"⚠️ Apify вернул только {len(latest)} из {s.profile_videos} последних роликов — "
+                           "выбор хитов может быть неточным, попробуйте ещё раз позже")
+        else:
+            await self.storage.save_profile(platform, username, latest, popular)
+        return latest, popular
 
     async def analyze_video(
         self, user_id: int, video: Video | None = None, *, platform: str | None = None, url: str | None = None,

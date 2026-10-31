@@ -77,9 +77,14 @@ def pick_feed(
     return picked
 
 
+FRESH, ALL_TIME = "fresh", "alltime"
+# Of the analysed videos, at most this many come from the all-time most popular list; the rest are fresh hits.
+ALL_TIME_SLOTS = 2
+
+
 @dataclass
 class ProfileStats:
-    videos: list[Video]
+    videos: list[Video]  # the latest videos: the account's baseline
     median_views: float
     mean_er: float | None
     hits: list[Video]
@@ -87,26 +92,52 @@ class ProfileStats:
     hit_count: int
     posts_per_week: float | None
     ratios: dict[str, float] = field(default_factory=dict)
+    kinds: dict[str, str] = field(default_factory=dict)  # hit key -> FRESH / ALL_TIME
+    popular: list[Video] = field(default_factory=list)  # all-time most popular videos, if collected
 
     def ratio(self, video: Video) -> float:
         return self.ratios.get(video.key, 0.0)
 
+    def kind(self, video: Video) -> str:
+        return self.kinds.get(video.key, FRESH)
+
+    @property
+    def all_videos(self) -> list[Video]:
+        """Everything collected, without duplicates: latest videos plus all-time popular ones."""
+        seen = {v.key for v in self.videos}
+        return self.videos + [v for v in self.popular if v.key not in seen]
+
+    @property
+    def period(self) -> tuple[datetime, datetime] | None:
+        dates = sorted(v.created_at for v in self.videos if v.created_at)
+        return (dates[0], dates[-1]) if dates else None
+
 
 def profile_stats(
-    videos: list[Video], *, top: int, flops: int = 3, now: datetime | None = None
+    videos: list[Video], *, top: int, popular: list[Video] | tuple = (), flops: int = 3, now: datetime | None = None
 ) -> ProfileStats:
+    """Hits are measured against the median of the latest videos: fresh outliers first,
+    plus up to ALL_TIME_SLOTS of the account's all-time most popular videos when those were collected."""
     now = now or datetime.now(timezone.utc)
     views = [estimated_views(v) for v in videos]
     median = statistics.median(views) if views else 0.0
-    ratios = {v.key: estimated_views(v) / median if median else 0.0 for v in videos}
+    everything = videos + [v for v in popular if v.key not in {x.key for x in videos}]
+    ratios = {v.key: estimated_views(v) / median if median else 0.0 for v in everything}
 
     by_ratio = sorted(videos, key=lambda v: ratios[v.key], reverse=True)
-    hits = [v for v in by_ratio if ratios[v.key] >= HIT_RATIO]
-    hit_count = len(hits)
-    if len(hits) < min(3, top):
+    fresh = [v for v in by_ratio if ratios[v.key] >= HIT_RATIO]
+    hit_count = len(fresh)
+    if len(fresh) < min(3, top):
         # Few clear outliers: still analyse the best performers of this account.
-        hits = by_ratio[: min(3, top)]
-    hits = hits[:top]
+        fresh = by_ratio[: min(3, top)]
+
+    fresh_keys = {v.key for v in fresh}
+    all_time = [v for v in sorted(popular, key=estimated_views, reverse=True) if v.key not in fresh_keys]
+    slots = min(ALL_TIME_SLOTS, len(all_time), top // 2)
+    hits = fresh[: top - slots] + all_time[:slots]
+    if len(hits) < top:
+        hits += [v for v in fresh[top - slots:] + all_time[slots:]][: top - len(hits)]
+    kinds = {v.key: (FRESH if v.key in fresh_keys else ALL_TIME) for v in hits}
 
     hit_keys = {v.key for v in hits}
     mature = [
@@ -131,4 +162,6 @@ def profile_stats(
         hit_count=hit_count,
         posts_per_week=posts_per_week,
         ratios=ratios,
+        kinds=kinds,
+        popular=list(popular),
     )
