@@ -11,6 +11,7 @@ from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     ForceReply,
     InlineKeyboardButton,
@@ -24,6 +25,7 @@ from aiogram.types import (
 
 from . import costs
 from . import formatting as fmt
+from . import report as report_file
 from . import topics as topic_list
 from .analyzer import AnalysisError
 from .apify_source import ApifyError, feed_cost_usd
@@ -177,7 +179,7 @@ async def run_exclusive(message: Message, svc: Services, user_id: int, job: Call
         except Exception as exc:  # noqa: BLE001 - report anything to the user instead of failing silently
             log.exception("job failed")
             await message.answer(f"❌ Что-то пошло не так: {escape(type(exc).__name__)}: {escape(str(exc))[:500]}")
-        if not spent.empty:
+        if not spent.empty and not spent.shown:
             await message.answer(fmt.costs_line(spent))
 
 
@@ -186,14 +188,38 @@ async def analyze_profile(message: Message, svc: Services, user_id: int, platfor
         status = await StatusMessage.create(message, "⏳ Начинаю…")
         result = await svc.analyze_profile(user_id, platform, username, status.update)
         await status.delete()
-        await send_long(message, [fmt.profile_overview(platform, username, result.stats)],
-                        link_preview_options=NO_PREVIEW)
-        if result.report is None:
-            await message.answer("ℹ️ POLZA_API_KEY не задан — показываю только статистику, без разбора.")
+        if result.report is None or svc.settings.report_format == "chat":
+            await send_long(message, [fmt.profile_overview(platform, username, result.stats)],
+                            link_preview_options=NO_PREVIEW)
+            if result.report is None:
+                await message.answer("ℹ️ POLZA_API_KEY не задан — показываю только статистику, без разбора.")
+            else:
+                await send_long(message, fmt.profile_report(result.report, result.stats), link_preview_options=NO_PREVIEW)
             return
-        await send_long(message, fmt.profile_report(result.report, result.stats), link_preview_options=NO_PREVIEW)
+        await send_report_file(message, svc, platform, username, result)
 
     await run_exclusive(message, svc, user_id, job)
+
+
+async def send_report_file(message: Message, svc: Services, platform: str, username: str, result: Any) -> None:
+    """The whole breakdown as one PDF (or Markdown) with a short caption, so the chat stays clean."""
+    spent = costs.current()
+    footer = fmt.costs_plain(spent, result.model)
+    data, name = None, None
+    if svc.settings.report_format != "md":
+        try:
+            data = report_file.build_pdf(platform, username, result.stats, result.report, result.media, footer)
+            name = report_file.file_name(platform, username, "pdf")
+        except Exception as exc:  # noqa: BLE001 - fall back to Markdown rather than lose the report
+            log.exception("PDF report failed")
+            costs.add_note(f"PDF не собрался ({str(exc)[:120]}) — отправил Markdown")
+    if data is None:
+        data = report_file.build_markdown(platform, username, result.stats, result.report, footer).encode("utf-8")
+        name = report_file.file_name(platform, username, "md")
+    caption = fmt.report_caption(platform, username, result.stats, result.report, spent)
+    await message.answer_document(BufferedInputFile(data, filename=name), caption=caption)
+    if spent is not None:
+        spent.shown = True
 
 
 async def analyze_video(message: Message, svc: Services, user_id: int, **kwargs: Any) -> None:

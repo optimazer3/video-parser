@@ -41,6 +41,8 @@ class FeedResult:
 class ProfileResult:
     stats: ProfileStats
     report: ProfileReport | None
+    media: dict[str, VideoMedia] = field(default_factory=dict)
+    model: str | None = None
 
 
 class Services:
@@ -142,7 +144,7 @@ class Services:
         report = await self.analyzer.profile_report(
             platform, username, stats, media, model=model, use_video=use_video
         )
-        return ProfileResult(stats, report)
+        return ProfileResult(stats, report, media, model)
 
     async def analyze_video(
         self, user_id: int, video: Video | None = None, *, platform: str | None = None, url: str | None = None,

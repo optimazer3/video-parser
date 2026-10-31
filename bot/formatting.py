@@ -113,16 +113,16 @@ MAX_STEPS, MAX_IMPROVE, MAX_TAKEAWAYS, MAX_IDEAS = 5, 2, 3, 3
 STEP_NUMBER_RE = re.compile(r"^\s*(?:шаг\s*)?\d+\s*[.):—-]\s*", re.IGNORECASE)
 
 
-def _clean(items: list[str], limit: int) -> list[str]:
+def clean_items(items: list[str], limit: int) -> list[str]:
     return [STEP_NUMBER_RE.sub("", item).strip() for item in items if item.strip()][:limit]
 
 
 def _bullets(items: list[str], limit: int) -> str:
-    return "\n".join(f"• {escape(item)}" for item in _clean(items, limit))
+    return "\n".join(f"• {escape(item)}" for item in clean_items(items, limit))
 
 
 def _steps(items: list[str], limit: int) -> str:
-    return "\n".join(f"{i}. {escape(item)}" for i, item in enumerate(_clean(items, limit), 1))
+    return "\n".join(f"{i}. {escape(item)}" for i, item in enumerate(clean_items(items, limit), 1))
 
 
 def video_analysis(analysis: VideoAnalysis, video: Video | None, ratio: float | None = None) -> str:
@@ -137,15 +137,18 @@ def video_analysis(analysis: VideoAnalysis, video: Video | None, ratio: float | 
         f"🔥 <b>Почему залетел:</b> {escape(analysis.why)}",
         f"🪝 <b>Хук:</b> {escape(analysis.hook)}",
     ]
-    if _clean(analysis.how_to_make, MAX_STEPS):
+    if clean_items(analysis.how_to_make, MAX_STEPS):
         parts.append(f"🛠 <b>Как сделать без лица:</b>\n{_steps(analysis.how_to_make, MAX_STEPS)}")
-    if _clean(analysis.improve, MAX_IMPROVE):
+    if analysis.key_prompt.strip():
+        parts.append(f"🤖 <b>Промпт для Claude / Gemini</b> (нажмите, чтобы скопировать):\n"
+                     f"<code>{escape(analysis.key_prompt.strip())}</code>")
+    if clean_items(analysis.improve, MAX_IMPROVE):
         parts.append(f"⚠️ <b>Улучшить:</b>\n{_bullets(analysis.improve, MAX_IMPROVE)}")
     return "\n\n".join(parts)
 
 
 def _ideas(ideas: list[str]) -> str | None:
-    return f"💡 <b>Идеи роликов</b>\n{_bullets(ideas, MAX_IDEAS)}" if _clean(ideas, MAX_IDEAS) else None
+    return f"💡 <b>Идеи роликов</b>\n{_bullets(ideas, MAX_IDEAS)}" if clean_items(ideas, MAX_IDEAS) else None
 
 
 def pack(blocks: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -161,7 +164,7 @@ def pack(blocks: list[str], limit: int = TELEGRAM_LIMIT) -> list[str]:
 
 def profile_report(report: ProfileReport, stats: ProfileStats) -> list[str]:
     head = f"🧠 <b>Главное</b>\n{escape(report.summary)}"
-    if _clean(report.takeaways, MAX_TAKEAWAYS):
+    if clean_items(report.takeaways, MAX_TAKEAWAYS):
         head += "\n" + _bullets(report.takeaways, MAX_TAKEAWAYS)
     blocks = [head]
     for analysis in report.videos:
@@ -215,3 +218,30 @@ def costs_line(costs: Costs) -> str:
     lines = ["<i>💸 " + " · ".join(parts) + "</i>"] if parts else []
     lines += [f"<i>{escape(note)}</i>" for note in costs.notes]
     return "\n".join(lines)
+
+
+def report_caption(platform: str, username: str, stats: ProfileStats, report: ProfileReport, costs: Costs | None) -> str:
+    """Short text under the report file: the numbers, the main conclusion and the cost (caption limit is 1024)."""
+    label = PLATFORM_LABELS.get(platform, platform)
+    summary = short(report.summary, 450)
+    lines = [
+        f"📊 <b>@{escape(username)} · {label}</b> — полный разбор в файле",
+        f"Роликов: {len(stats.videos)} · медиана {num(stats.median_views)} · залетевших: {stats.hit_count}",
+        "",
+        f"🧠 {escape(summary)}",
+    ]
+    if costs is not None and not costs.empty:
+        lines += ["", costs_line(costs)]
+    return "\n".join(lines)
+
+
+def costs_plain(costs: Costs | None, model: str | None) -> str:
+    parts = [f"Модель: {model}"] if model else []
+    if costs is not None:
+        if costs.apify_runs:
+            parts.append(f"Apify ≈ ${costs.apify_usd:.2f}")
+        elif costs.from_cache:
+            parts.append("Apify — из кэша")
+        if costs.llm_models:
+            parts.append(f"нейросеть ≈ {costs.llm_rub:.1f} руб.")
+    return " · ".join(parts)

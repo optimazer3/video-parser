@@ -1,4 +1,5 @@
 import asyncio
+import re
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -429,3 +430,42 @@ def test_video_mode_sends_clip():
     assert with_video[-1]["type"] == "video_url" and with_video[-1]["video_url"]["url"].startswith("data:video/mp4;base64,")
     frames = _video_blocks(make_video(1, 1000), 1, None, media, use_video=False)
     assert frames[-1]["type"] == "image_url"
+
+
+def _sample_report():
+    videos = [make_video(i, 10_000 + i) for i in range(8)] + [make_video(50, 100_000), make_video(51, 60_000)]
+    stats = profile_stats(videos, top=3, now=NOW)
+    analyses = [dict(REPORT["videos"][0], video_number=n, key_prompt="Сделай HTML-анимацию 🤯 счётчика 0→30")
+                for n in (1, 2, 3)]
+    report = ProfileReport.model_validate(dict(REPORT, summary="Итог " * 200, videos=analyses))
+    return stats, report
+
+
+def test_report_files():
+    from bot.media import VideoMedia
+    from bot.report import build_markdown, build_pdf, file_name, find_fonts
+
+    stats, report = _sample_report()
+    md = build_markdown(TIKTOK, "neuro.lab", stats, report, footer="Модель: m")
+    assert "## Ролик №1" in md and "Сделай HTML-анимацию" in md and md.count("```") == 6
+    assert file_name(TIKTOK, "neuro.lab", "pdf").startswith("razbor_neuro.lab_tiktok_")
+    assert file_name(TIKTOK, "../../x", "md").startswith("razbor_.._.._x_")  # no path separators
+    if find_fonts() is None:
+        pytest.skip("no Cyrillic font on this machine")
+    media = {v.key: VideoMedia(frames=[(0.0, b"not a jpeg")]) for v in stats.hits}  # broken frames must not break it
+    pdf = build_pdf(TIKTOK, "neuro.lab", stats, report, media, footer="Модель: m")
+    assert pdf[:4] == b"%PDF" and len(pdf) > 5000
+
+
+def test_report_caption_and_prompt_in_chat():
+    from bot import costs
+    from bot.formatting import report_caption, video_analysis
+
+    stats, report = _sample_report()
+    spent = costs.Costs(apify_usd=0.11, apify_runs=[("a", 0.11)], llm_rub=2.9, llm_models=["m"],
+                        notes=["🎞 нейросеть смотрела ролики целиком, со звуком"])
+    caption = report_caption(TIKTOK, "neuro.lab", stats, report, spent)
+    visible = re.sub(r"<[^>]+>", "", caption)
+    assert len(visible) <= 1024 and "$0.11" in caption and "целиком" in caption
+    chat = video_analysis(report.videos[0], None)
+    assert "<code>Сделай HTML-анимацию" in chat

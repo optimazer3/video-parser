@@ -14,6 +14,7 @@ class Costs:
     llm_models: list[str] = field(default_factory=list)
     from_cache: bool = False
     notes: list[str] = field(default_factory=list)
+    shown: bool = False  # already printed (e.g. in the report caption), no separate cost message needed
 
     @property
     def empty(self) -> bool:
@@ -28,6 +29,10 @@ def track() -> Costs:
     costs = Costs()
     _current.set(costs)
     return costs
+
+
+def current() -> Costs | None:
+    return _current.get()
 
 
 def add_apify(actor_id: str, usd: float) -> None:
