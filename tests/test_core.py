@@ -268,7 +268,7 @@ def test_profile_cache(tmp_path):
         await storage.save_profile(TIKTOK, "ai_guru", latest, popular)
         cached = await storage.get_profile(TIKTOK, "AI_Guru", 24)
         disabled = await storage.get_profile(TIKTOK, "ai_guru", 0)
-        # A row written by the previous version (a plain list) still loads.
+        # A row written by the previous version (a plain list) is ignored, so the profile is collected again.
         await storage.db.execute("UPDATE profiles SET data = ?", (json.dumps([v.to_dict() for v in latest]),))
         old = await storage.get_profile(TIKTOK, "ai_guru", 24)
         await storage.close()
@@ -276,7 +276,7 @@ def test_profile_cache(tmp_path):
 
     (latest, popular), disabled, old = asyncio.run(run())
     assert [v.views for v in latest] == [1000, 5000] and popular[0].views == 900_000 and disabled is None
-    assert len(old[0]) == 2 and old[1] == []
+    assert old is None
 
 
 def test_hits_mix_fresh_and_all_time():

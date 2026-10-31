@@ -92,8 +92,8 @@ class Storage:
         if not row:
             return None
         data = json.loads(row[0])
-        if isinstance(data, list):  # cache written before the popular list existed
-            data = {"latest": data, "popular": []}
+        if isinstance(data, list):
+            return None  # written before the popular list existed: collect again rather than reuse a partial set
         return ([Video.from_dict(v) for v in data["latest"]], [Video.from_dict(v) for v in data["popular"]])
 
     async def save_profile(self, platform: str, username: str, latest: list[Video], popular: list[Video]) -> None:
